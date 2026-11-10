@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-surface font-sans text-primary antialiased;
+}
+
+@layer base {
+  ::selection {
+    @apply bg-flash-100 text-flash-900;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-flash-300 ring-offset-1;
+  }
+}
+
+@layer components {
+  .input {
+    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-[13px] text-primary shadow-xs outline-none transition placeholder:text-slate-400 focus:border-flash-500 focus:ring-2 focus:ring-flash-200;
+  }
+  .field-label {
+    @apply mb-1 block text-[13px] font-medium text-primary;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-medium shadow-xs transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-flash-600 text-white hover:bg-flash-700;
+  }
+  .btn-secondary {
+    @apply btn border border-line bg-white text-primary hover:bg-slate-50;
+  }
+  .btn-danger {
+    @apply btn border border-red-200 bg-red-50 text-red-600 hover:bg-red-100;
+  }
+
+  .card {
+    @apply rounded-xl border border-line bg-card p-5 shadow-xs;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium;
+  }
+
+  .sidebar-link {
+    @apply relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] font-medium text-muted transition-colors hover:bg-slate-50 hover:text-primary;
+  }
+  .sidebar-link-active {
+    @apply bg-flash-50 font-semibold text-flash-700 hover:bg-flash-50 hover:text-flash-700;
+  }
+  .subnav-link {
+    @apply flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-left text-[13px] text-muted transition-colors hover:bg-slate-50 hover:text-primary;
+  }
+  .subnav-link-active {
+    @apply bg-flash-50 font-semibold text-flash-700 hover:bg-flash-50 hover:text-flash-700;
+  }
+
+  .section-label {
+    @apply text-[10px] font-semibold uppercase tracking-wider text-slate-400;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+}

@@ -1,0 +1,20 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# never commit env files
+.env
+.env.local
+.env.*.local
+apps/*/.env
+apps/*/!.env.example
+
+# local storage adapter data
+data/
+tmp/
+.vitest/
+
+# Freebuff workspace metadata (machine-specific local paths, not project source)
+.freebuff/

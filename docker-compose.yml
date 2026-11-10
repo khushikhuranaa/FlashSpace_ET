@@ -1,0 +1,21 @@
+# Local development helpers only — nothing here is required for the zero-config demo.
+# Postgres is only needed when REPO_MODE=postgres (`npm run db:migrate -w @flashspace/api`).
+# Mailpit catches optional SMTP notifications at http://localhost:8025 (SMTP on 1025).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: flashspace
+      POSTGRES_PASSWORD: flashspace
+      POSTGRES_DB: flashspace
+    ports:
+      - "5432:5432"
+    volumes:
+      - flashspace-pgdata:/var/lib/postgresql/data
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # Web UI
+volumes:
+  flashspace-pgdata:
