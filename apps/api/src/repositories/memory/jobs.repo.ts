@@ -88,6 +88,14 @@ export class MemoryCleanupRunsRepo implements CleanupRunsRepo {
   listForSpace(spaceId: string): CleanupRun[] {
     return [...this.runs.values()].filter((r) => r.spaceId === spaceId);
   }
+
+  update(id: string, patch: Partial<CleanupRun>): CleanupRun | undefined {
+    const current = this.runs.get(id);
+    if (!current) return undefined;
+    const next = { ...current, ...patch };
+    this.runs.set(id, next);
+    return next;
+  }
 }
 
 export class MemoryActivityRepo implements ActivityRepo {

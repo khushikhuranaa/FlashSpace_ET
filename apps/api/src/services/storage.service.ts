@@ -15,17 +15,17 @@ export class StorageService {
     private readonly spaces: SpacesService,
   ) {}
 
-  summary(actor: AuthUser): StorageSummary {
-    const spaces = this.spaces.listForUser(actor.id);
+  async summary(actor: AuthUser): Promise<StorageSummary> {
+    const spaces = await this.spaces.listForUser(actor.id);
     const quotaBytes = this.env.spaceMaxBytes * this.env.maxActiveSpacesPerUser;
 
-    const rows = spaces.map((space) => {
-      const usedBytes = this.db.files.usedBytesForSpace(space.id);
-      const archivedBytes = this.db.archives
-        .listForSpace(space.id)
+    const rows: StorageSummary['spaces'] = [];
+    for (const space of spaces) {
+      const usedBytes = await this.db.files.usedBytesForSpace(space.id);
+      const archivedBytes = (await this.db.archives.listForSpace(space.id))
         .filter((a) => a.status === 'VERIFIED')
         .reduce((sum, a) => sum + a.sizeBytes, 0);
-      return {
+      rows.push({
         spaceId: space.id,
         name: space.name,
         status: space.status,
@@ -33,17 +33,15 @@ export class StorageService {
         archivedBytes,
         archivedManually: space.archivedManually,
         owned: space.ownerId === actor.id,
-      };
-    });
+      });
+    }
 
     // Archived Vault storage belongs to the owner only (archives follow the owner).
-    const archivedBytes = this.db.archives
-      .listForOwner(actor.id)
+    const archivedBytes = (await this.db.archives.listForOwner(actor.id))
       .filter((a) => a.status === 'VERIFIED')
       .reduce((sum, a) => sum + a.sizeBytes, 0);
 
-    const usedBytes =
-      rows.reduce((sum, r) => sum + r.usedBytes, 0) + archivedBytes;
+    const usedBytes = rows.reduce((sum, r) => sum + r.usedBytes, 0) + archivedBytes;
     const freeBytes = Math.max(0, quotaBytes - usedBytes);
 
     return {

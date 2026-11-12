@@ -8,20 +8,24 @@ import type { FoldersRepo } from '../repositories/data-layer.interface.js';
  *
  * Returns a prefix ending in `/` (`''` at the Space root) so callers can build
  * both storage keys and archive entry names by simple concatenation.
+ *
+ * Async because the repository contract is `Awaitable<T>`: the local backends
+ * answer synchronously while PostgreSQL resolves a Promise. Walking the parent
+ * chain therefore awaits each lookup in turn.
  */
-export function folderPathFor(
+export async function folderPathFor(
   folders: FoldersRepo,
   spaceId: string,
   folderId: string | null | undefined,
-): string {
+): Promise<string> {
   if (!folderId) return '';
   const seen = new Set<string>();
   const parts: string[] = [];
-  let current: Folder | undefined = folders.findById(folderId);
+  let current: Folder | undefined = await folders.findById(folderId);
   while (current && current.spaceId === spaceId && !seen.has(current.id)) {
     seen.add(current.id);
     parts.unshift(current.name);
-    current = current.parentId ? folders.findById(current.parentId) : undefined;
+    current = current.parentId ? await folders.findById(current.parentId) : undefined;
   }
   return parts.length ? `${parts.join('/')}/` : '';
 }

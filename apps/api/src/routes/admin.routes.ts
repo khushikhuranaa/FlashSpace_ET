@@ -10,35 +10,35 @@ export function adminRoutes(admin: AdminService): Router {
   router.get(
     '/admin/stats',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json(admin.stats(req.user!.id));
+      res.json(await admin.stats(req.user!.id));
     }),
   );
 
   router.get(
     '/admin/users',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ users: admin.listUsers(req.user!.id) });
+      res.json({ users: await admin.listUsers(req.user!.id) });
     }),
   );
 
   router.post(
     '/admin/users/:userId/promote',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ user: admin.promoteToAdmin(req.user!.id, req.params.userId!) });
+      res.json({ user: await admin.promoteToAdmin(req.user!.id, req.params.userId!) });
     }),
   );
 
   router.get(
     '/admin/jobs',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ jobs: admin.listJobs(req.user!.id) });
+      res.json({ jobs: await admin.listJobs(req.user!.id) });
     }),
   );
 
   router.get(
     '/admin/extensions',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ requests: admin.listExtensions(req.user!.id) });
+      res.json({ requests: await admin.listExtensions(req.user!.id) });
     }),
   );
 

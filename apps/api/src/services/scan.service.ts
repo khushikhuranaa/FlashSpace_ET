@@ -48,8 +48,8 @@ export class ScanService {
 
   /** Run a fresh scan. Only the Space owner may scan (PRD §7). */
   async scan(actor: AuthUser, spaceId: string): Promise<StorageInsights> {
-    this.spaces.requireRole(spaceId, actor.id, ['OWNER']);
-    const space = this.db.spaces.findById(spaceId);
+    await this.spaces.requireRole(spaceId, actor.id, ['OWNER']);
+    const space = await this.db.spaces.findById(spaceId);
     if (!space || space.status === 'DELETED') throw new AppError('SPACE_NOT_FOUND', 'Space not found');
 
     const now = new Date().toISOString();
@@ -73,8 +73,8 @@ export class ScanService {
       createdAt: now,
       updatedAt: now,
     };
-    this.db.scanJobs.insert(scan);
-    this.db.activity.append({
+    await this.db.scanJobs.insert(scan);
+    await this.db.activity.append({
       userId: actor.id,
       spaceId,
       fileId: null,
@@ -82,7 +82,7 @@ export class ScanService {
       metadata: { scanId },
     });
 
-    const files = this.db.files.listActiveForSpace(spaceId);
+    const files = await this.db.files.listActiveForSpace(spaceId);
     scan.totalFiles = files.length;
 
     // Hash every file; collect failures separately.
@@ -91,21 +91,29 @@ export class ScanService {
     for (const file of files) {
       const result = await this.hashFile(file);
       if (result.sha256) hashed.push({ file, sha256: result.sha256 });
-      else unscanned.push({ fileId: file.id, name: file.name, path: this.pathOf(file), objectKey: file.objectKey, sizeBytes: file.sizeBytes, error: result.error ?? 'Unknown error' });
+      else
+        unscanned.push({
+          fileId: file.id,
+          name: file.name,
+          path: await this.pathOf(file),
+          objectKey: file.objectKey,
+          sizeBytes: file.sizeBytes,
+          error: result.error ?? 'Unknown error',
+        });
     }
 
     // If nothing could be read but files exist, the scan genuinely failed:
     // record it and return no fabricated duplicates.
     if (files.length > 0 && hashed.length === 0) {
       const message = unscanned[0]?.error ?? 'No files could be read';
-      this.db.scanJobs.update(scanId, {
+      await this.db.scanJobs.update(scanId, {
         status: 'FAILED',
         failedAt: new Date().toISOString(),
         errorMessage: message,
         totalFiles: files.length,
       });
-      this.spaces.notify(space.ownerId, spaceId, 'SCAN_FAILED', `Storage scan failed for "${space.name}"`, message);
-      this.db.activity.append({
+      await this.spaces.notify(space.ownerId, spaceId, 'SCAN_FAILED', `Storage scan failed for "${space.name}"`, message);
+      await this.db.activity.append({
         userId: actor.id,
         spaceId,
         fileId: null,
@@ -133,7 +141,7 @@ export class ScanService {
         largeFiles.push({
           fileId: file.id,
           name: file.name,
-          path: this.pathOf(file),
+          path: await this.pathOf(file),
           objectKey: file.objectKey,
           sizeBytes: file.sizeBytes,
           mimeType: file.mimeType,
@@ -162,7 +170,7 @@ export class ScanService {
       const representativeName = bucket
         .map((e) => e.file.name)
         .sort((a, b) => a.localeCompare(b))[0]!;
-      this.db.duplicateGroups.insert({
+      await this.db.duplicateGroups.insert({
         id: groupId,
         scanId,
         contentHash: hash,
@@ -173,7 +181,7 @@ export class ScanService {
         representativeName,
       });
       for (const { file } of bucket) {
-        this.db.duplicateFiles.insert({
+        await this.db.duplicateFiles.insert({
           id: newId(),
           groupId,
           scanId,
@@ -189,9 +197,9 @@ export class ScanService {
       }
     }
 
-    const nearDuplicates = this.buildNearDuplicates(scanId, hashed);
+    const nearDuplicates = await this.buildNearDuplicates(scanId, hashed);
 
-    this.db.scanJobs.update(scanId, {
+    await this.db.scanJobs.update(scanId, {
       status: 'VERIFIED',
       totalFiles: files.length,
       totalBytes,
@@ -202,19 +210,17 @@ export class ScanService {
       largeFileCount,
       nearDuplicateGroupCount: nearDuplicates.length,
       scannedAt: new Date().toISOString(),
-      errorMessage: unscanned.length
-        ? `${unscanned.length} file(s) could not be scanned`
-        : null,
+      errorMessage: unscanned.length ? `${unscanned.length} file(s) could not be scanned` : null,
     });
 
-    this.spaces.notify(
+    await this.spaces.notify(
       space.ownerId,
       spaceId,
       'SCAN_READY',
       `Storage scan ready for "${space.name}"`,
       `${duplicateGroupCount} exact duplicate group(s), ${nearDuplicates.length} possible near-duplicate group(s), ${this.fmt(potentialSavingsBytes)} potential savings.`,
     );
-    this.db.activity.append({
+    await this.db.activity.append({
       userId: actor.id,
       spaceId,
       fileId: null,
@@ -235,13 +241,13 @@ export class ScanService {
   /** Latest scan report for a Space. Never fabricates duplicates: when no scan
    *  has run, or the latest scan failed, the duplicate sections stay empty. */
   async getInsights(actor: AuthUser, spaceId: string): Promise<StorageInsights> {
-    this.spaces.requireRole(spaceId, actor.id, ['OWNER', 'EDITOR', 'VIEWER']);
-    const space = this.db.spaces.findById(spaceId);
+    await this.spaces.requireRole(spaceId, actor.id, ['OWNER', 'EDITOR', 'VIEWER']);
+    const space = await this.db.spaces.findById(spaceId);
     if (!space || space.status === 'DELETED') throw new AppError('SPACE_NOT_FOUND', 'Space not found');
 
-    const latest = this.db.scanJobs.listForSpace(spaceId)[0];
+    const latest = (await this.db.scanJobs.listForSpace(spaceId))[0];
     if (!latest) {
-      const files = this.db.files.listActiveForSpace(spaceId);
+      const files = await this.db.files.listActiveForSpace(spaceId);
       return this.emptyReport(spaceId, space.ownerId, files, [], 'PENDING', null);
     }
     return this.buildReport(latest.id);
@@ -259,7 +265,7 @@ export class ScanService {
         hash.update(buf);
       }
       const hex = hash.digest('hex');
-      this.db.files.update(file.id, { sha256: hex });
+      await this.db.files.update(file.id, { sha256: hex });
       return { sha256: hex, error: null };
     } catch (err) {
       return { sha256: null, error: err instanceof Error ? err.message : String(err) };
@@ -267,7 +273,10 @@ export class ScanService {
   }
 
   /** Possible versions: similar basenames whose content hashes DIFFER. */
-  private buildNearDuplicates(scanId: string, hashed: { file: FileRecord; sha256: string }[]): NearDuplicateGroupView[] {
+  private async buildNearDuplicates(
+    scanId: string,
+    hashed: { file: FileRecord; sha256: string }[],
+  ): Promise<NearDuplicateGroupView[]> {
     const byBase = new Map<string, { file: FileRecord; sha256: string }[]>();
     for (const entry of hashed) {
       const base = this.normalizeBasename(entry.file.name);
@@ -281,18 +290,22 @@ export class ScanService {
       if (bucket.length < 2) continue;
       const distinctHashes = new Set(bucket.map((e) => e.sha256));
       if (distinctHashes.size < 2) continue; // all identical → exact duplicates
+      const nearFiles: NearDuplicateGroupView['files'] = [];
+      for (const e of bucket) {
+        nearFiles.push({
+          fileId: e.file.id,
+          name: e.file.name,
+          path: await this.pathOf(e.file),
+          sizeBytes: e.file.sizeBytes,
+          sha256: e.sha256,
+        });
+      }
       result.push({
         id: `near-${scanId}-${result.length}`,
         baseName: base || bucket[0]!.file.name,
-        fileCount: bucket.length,
-        totalBytes: bucket.reduce((sum, e) => sum + e.file.sizeBytes, 0),
-        files: bucket.map((e) => ({
-          fileId: e.file.id,
-          name: e.file.name,
-          path: this.pathOf(e.file),
-          sizeBytes: e.file.sizeBytes,
-          sha256: e.sha256,
-        })),
+        fileCount: nearFiles.length,
+        totalBytes: nearFiles.reduce((sum, f) => sum + f.sizeBytes, 0),
+        files: nearFiles,
       });
     }
     return result.sort((a, b) => b.totalBytes - a.totalBytes);
@@ -310,40 +323,57 @@ export class ScanService {
   }
 
   /** Builds the report from persisted rows so every number has a DB source. */
-  private buildReport(scanId: string): StorageInsights {
-    const scan = this.db.scanJobs.findById(scanId);
+  private async buildReport(scanId: string): Promise<StorageInsights> {
+    const scan = await this.db.scanJobs.findById(scanId);
     if (!scan) throw new AppError('NOT_FOUND', 'Scan not found');
-    const space = this.db.spaces.findById(scan.spaceId);
 
-    const groups = this.db.duplicateGroups.listForScan(scanId);
-    const exactDuplicates: DuplicateGroupView[] = groups.map((g) => ({
-      id: g.id,
-      scanId: g.scanId,
-      contentHash: g.contentHash,
-      fileCount: g.fileCount,
-      extraCopyCount: g.extraCopyCount,
-      totalBytes: g.totalBytes,
-      potentialSavingsBytes: g.potentialSavingsBytes,
-      representativeName: g.representativeName,
-      files: this.db.duplicateFiles.listForGroup(g.id).map((f) => ({
-        fileId: f.fileId,
-        name: f.name,
-        path: this.pathOfFileId(f.fileId, f.name),
-        objectKey: f.objectKey,
-        sizeBytes: f.sizeBytes,
-        mimeType: f.mimeType,
-        uploadedAt: f.uploadedAt,
-        uploaderId: f.uploaderId,
-        excluded: f.excluded,
-      })),
-    }));
+    const groups = await this.db.duplicateGroups.listForScan(scanId);
+    const exactDuplicates: DuplicateGroupView[] = [];
+    for (const g of groups) {
+      const groupFiles: DuplicateGroupView['files'] = [];
+      for (const f of await this.db.duplicateFiles.listForGroup(g.id)) {
+        groupFiles.push({
+          fileId: f.fileId,
+          name: f.name,
+          path: await this.pathOfFileId(f.fileId, f.name),
+          objectKey: f.objectKey,
+          sizeBytes: f.sizeBytes,
+          mimeType: f.mimeType,
+          uploadedAt: f.uploadedAt,
+          uploaderId: f.uploaderId,
+          excluded: f.excluded,
+        });
+      }
+      exactDuplicates.push({
+        id: g.id,
+        scanId: g.scanId,
+        contentHash: g.contentHash,
+        fileCount: g.fileCount,
+        extraCopyCount: g.extraCopyCount,
+        totalBytes: g.totalBytes,
+        potentialSavingsBytes: g.potentialSavingsBytes,
+        representativeName: g.representativeName,
+        files: groupFiles,
+      });
+    }
 
-    const activeFiles = this.db.files.listActiveForSpace(scan.spaceId);
-    const largeFiles: LargeFileView[] = activeFiles
-      .filter((f) => f.sizeBytes >= this.largeFileBytes)
-      .map((f) => ({ fileId: f.id, name: f.name, path: this.pathOf(f), objectKey: f.objectKey, sizeBytes: f.sizeBytes, mimeType: f.mimeType, uploadedAt: f.createdAt }));
+    const activeFiles = await this.db.files.listActiveForSpace(scan.spaceId);
+    const largeFiles: LargeFileView[] = [];
+    for (const f of activeFiles) {
+      if (f.sizeBytes >= this.largeFileBytes) {
+        largeFiles.push({
+          fileId: f.id,
+          name: f.name,
+          path: await this.pathOf(f),
+          objectKey: f.objectKey,
+          sizeBytes: f.sizeBytes,
+          mimeType: f.mimeType,
+          uploadedAt: f.createdAt,
+        });
+      }
+    }
 
-    const nearDuplicates: NearDuplicateGroupView[] = this.deriveNearDuplicatesFromFiles(scanId, activeFiles);
+    const nearDuplicates = await this.deriveNearDuplicatesFromFiles(scanId, activeFiles);
 
     return {
       scan: this.toScanView(scan),
@@ -352,9 +382,10 @@ export class ScanService {
       exactDuplicates,
       nearDuplicates,
       largeFiles,
-      unscannedFiles: scan.status === 'FAILED' && scan.errorMessage
-        ? [{ fileId: '', name: '*', path: '*', objectKey: '', sizeBytes: 0, error: scan.errorMessage }]
-        : [],
+      unscannedFiles:
+        scan.status === 'FAILED' && scan.errorMessage
+          ? [{ fileId: '', name: '*', path: '*', objectKey: '', sizeBytes: 0, error: scan.errorMessage }]
+          : [],
       duplicateGroupCount: scan.duplicateGroups,
       duplicateFileCount: scan.duplicateFileCount,
       extraCopyCount: scan.extraCopyCount,
@@ -368,7 +399,7 @@ export class ScanService {
    * similar basenames whose hashes DIFFER. Files with identical hashes are exact
    * duplicates (reported separately) and are never repeated here.
    */
-  private deriveNearDuplicatesFromFiles(scanId: string, files: FileRecord[]): NearDuplicateGroupView[] {
+  private async deriveNearDuplicatesFromFiles(scanId: string, files: FileRecord[]): Promise<NearDuplicateGroupView[]> {
     const byBase = new Map<string, FileRecord[]>();
     for (const file of files) {
       if (!file.sha256) continue;
@@ -382,13 +413,16 @@ export class ScanService {
     for (const [base, bucket] of byBase.entries()) {
       if (bucket.length < 2) continue;
       if (new Set(bucket.map((f) => f.sha256)).size < 2) continue;
-      const groupFiles: NearDuplicateGroupView['files'] = bucket.map((f) => ({
-        fileId: f.id,
-        name: f.name,
-        path: this.pathOf(f),
-        sizeBytes: f.sizeBytes,
-        sha256: f.sha256,
-      }));
+      const groupFiles: NearDuplicateGroupView['files'] = [];
+      for (const f of bucket) {
+        groupFiles.push({
+          fileId: f.id,
+          name: f.name,
+          path: await this.pathOf(f),
+          sizeBytes: f.sizeBytes,
+          sha256: f.sha256,
+        });
+      }
       result.push({
         id: `near-${scanId}-${base.slice(0, 12)}`,
         baseName: base,
@@ -400,19 +434,30 @@ export class ScanService {
     return result.sort((a, b) => b.totalBytes - a.totalBytes);
   }
 
-  private emptyReport(
+  private async emptyReport(
     spaceId: string,
     ownerId: string,
     files: FileRecord[],
     unscanned: UnscannedFileView[],
     status: string,
     errorMessage: string | null,
-  ): StorageInsights {
+  ): Promise<StorageInsights> {
     const now = new Date().toISOString();
     const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
-    const largeFiles: LargeFileView[] = files
-      .filter((f) => f.sizeBytes >= this.largeFileBytes)
-      .map((f) => ({ fileId: f.id, name: f.name, path: this.pathOf(f), objectKey: f.objectKey, sizeBytes: f.sizeBytes, mimeType: f.mimeType, uploadedAt: f.createdAt }));
+    const largeFiles: LargeFileView[] = [];
+    for (const f of files) {
+      if (f.sizeBytes >= this.largeFileBytes) {
+        largeFiles.push({
+          fileId: f.id,
+          name: f.name,
+          path: await this.pathOf(f),
+          objectKey: f.objectKey,
+          sizeBytes: f.sizeBytes,
+          mimeType: f.mimeType,
+          uploadedAt: f.createdAt,
+        });
+      }
+    }
     return {
       scan: {
         id: '',
@@ -448,13 +493,13 @@ export class ScanService {
   }
 
   /** Path of a file inside its Space (`<folder path><name>`). */
-  private pathOf(file: FileRecord): string {
-    const prefix = folderPathFor(this.db.folders, file.spaceId, file.folderId);
+  private async pathOf(file: FileRecord): Promise<string> {
+    const prefix = await folderPathFor(this.db.folders, file.spaceId, file.folderId);
     return `${prefix}${file.name}`;
   }
 
-  private pathOfFileId(fileId: string, fallbackName: string): string {
-    const file = this.db.files.findById(fileId);
+  private async pathOfFileId(fileId: string, fallbackName: string): Promise<string> {
+    const file = await this.db.files.findById(fileId);
     if (!file) return fallbackName;
     return this.pathOf(file);
   }

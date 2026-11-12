@@ -71,7 +71,8 @@ create table if not exists archive_plans (
   potential_savings_bytes bigint not null default 0,
   explained boolean not null default false,
   confirmed_at timestamptz,
-  archive_job_id uuid references archive_jobs(id) on delete set null,
+  -- The FK is added after archive_jobs exists (circular reference below).
+  archive_job_id uuid,
   error_message text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -94,3 +95,17 @@ create table if not exists archive_jobs (
 );
 create index if not exists archive_jobs_plan_idx on archive_jobs(plan_id);
 create index if not exists archive_jobs_owner_idx on archive_jobs(owner_id);
+
+-- archive_plans ↔ archive_jobs is circular: archive_plans.archive_job_id points
+-- at archive_jobs and archive_jobs.plan_id points back. The second direction is
+-- added here, after both tables exist, so a fresh migration cannot fail with
+-- "relation archive_jobs does not exist". Wrapped for idempotency because
+-- Postgres has no ADD CONSTRAINT IF NOT EXISTS.
+do $$
+begin
+  alter table archive_plans
+    add constraint archive_plans_archive_job_id_fkey
+    foreign key (archive_job_id) references archive_jobs(id) on delete set null;
+exception
+  when duplicate_object then null;
+end $$;

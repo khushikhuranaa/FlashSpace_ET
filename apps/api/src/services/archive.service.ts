@@ -28,21 +28,21 @@ export class ArchiveService {
    * the automatic retention cleanup so the owner stays in control of deletion.
    */
   async archiveNow(actor: AuthUser, spaceId: string): Promise<Archive> {
-    this.spaces.requireRole(spaceId, actor.id, ['OWNER']);
-    const space = this.db.spaces.findById(spaceId);
+    await this.spaces.requireRole(spaceId, actor.id, ['OWNER']);
+    const space = await this.db.spaces.findById(spaceId);
     if (!space || space.status === 'DELETED') throw new AppError('SPACE_NOT_FOUND', 'Space not found');
 
     if (space.status === 'ARCHIVED') {
-      const existing = this.db.archives.listForSpace(spaceId).find((a) => a.status === 'VERIFIED');
+      const existing = (await this.db.archives.listForSpace(spaceId)).find((a) => a.status === 'VERIFIED');
       if (existing) return existing;
     }
     this.spaces.assertWritable(space);
 
     // Flag first so a failure mid-flight cannot let the cleanup job sweep it.
-    this.db.spaces.update(spaceId, { archivedManually: true });
+    await this.db.spaces.update(spaceId, { archivedManually: true });
     const archive = await this.createPendingArchive(spaceId);
     const verified = await this.runArchive(archive.id);
-    this.db.activity.append({
+    await this.db.activity.append({
       userId: actor.id,
       spaceId,
       fileId: null,
@@ -53,9 +53,9 @@ export class ArchiveService {
   }
 
   async createPendingArchive(spaceId: string): Promise<Archive> {
-    const space = this.db.spaces.findById(spaceId);
+    const space = await this.db.spaces.findById(spaceId);
     if (!space) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
-    const existing = this.db.archives.listForSpace(spaceId).find((a) => a.status !== 'FAILED');
+    const existing = (await this.db.archives.listForSpace(spaceId)).find((a) => a.status !== 'FAILED');
     if (existing) return existing;
     const archive: Archive = {
       id: newId(),
@@ -69,29 +69,29 @@ export class ArchiveService {
       createdAt: new Date().toISOString(),
       verifiedAt: null,
     };
-    this.db.archives.insert(archive);
+    await this.db.archives.insert(archive);
     return archive;
   }
 
   async runArchive(archiveId: string): Promise<Archive> {
-    const archive = this.db.archives.findById(archiveId);
+    const archive = await this.db.archives.findById(archiveId);
     if (!archive) throw new AppError('ARCHIVE_NOT_FOUND', 'Archive not found');
     if (archive.status === 'CREATING') return archive; // another worker owns it
-    const space = this.db.spaces.findById(archive.spaceId);
+    const space = await this.db.spaces.findById(archive.spaceId);
     if (!space) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
 
-    this.db.archives.update(archiveId, { status: 'CREATING' });
-    this.db.spaces.update(archive.spaceId, { status: 'ARCHIVING' });
+    await this.db.archives.update(archiveId, { status: 'CREATING' });
+    await this.db.spaces.update(archive.spaceId, { status: 'ARCHIVING' });
     try {
-      const files = this.db.files.listActiveForSpace(archive.spaceId);
+      const files = await this.db.files.listActiveForSpace(archive.spaceId);
       // Preserve the original directory hierarchy (PRD §5.6) and never let two
       // different files collide on the same ZIP entry name.
       const usedNames = new Set<string>();
-      const entries = files.map((f) => {
-        const path = folderPathFor(this.db.folders, archive.spaceId, f.folderId);
-        const entryName = uniqueEntryName(path, f.name, usedNames);
-        return { file: f, path, entryName };
-      });
+      const entries: { file: (typeof files)[number]; path: string; entryName: string }[] = [];
+      for (const f of files) {
+        const path = await folderPathFor(this.db.folders, archive.spaceId, f.folderId);
+        entries.push({ file: f, path, entryName: uniqueEntryName(path, f.name, usedNames) });
+      }
       const manifest = {
         archiveId,
         spaceId: archive.spaceId,
@@ -148,7 +148,7 @@ export class ArchiveService {
         checksum.update(buf);
       }
       const checksumHex = checksum.digest('hex');
-      const updated = this.db.archives.update(archiveId, {
+      const updated = await this.db.archives.update(archiveId, {
         objectKey,
         sizeBytes: stored.size,
         checksum: checksumHex,
@@ -156,15 +156,15 @@ export class ArchiveService {
         status: 'VERIFIED',
         verifiedAt: new Date().toISOString(),
       });
-      this.db.spaces.update(archive.spaceId, { status: 'ARCHIVED' });
-      this.spaces.notify(
+      await this.db.spaces.update(archive.spaceId, { status: 'ARCHIVED' });
+      await this.spaces.notify(
         archive.ownerId,
         archive.spaceId,
         'SPACE_ARCHIVED',
         `Space "${space.name}" archived`,
         `A verified archive (${fileCount} file${fileCount === 1 ? '' : 's'}) is now in your Vault.`,
       );
-      this.db.activity.append({
+      await this.db.activity.append({
         userId: archive.ownerId,
         spaceId: archive.spaceId,
         fileId: null,
@@ -173,16 +173,16 @@ export class ArchiveService {
       });
       return updated!;
     } catch (err) {
-      this.db.archives.update(archiveId, { status: 'FAILED' });
-      this.db.spaces.update(archive.spaceId, { status: 'ARCHIVE_FAILED' });
-      this.spaces.notify(
+      await this.db.archives.update(archiveId, { status: 'FAILED' });
+      await this.db.spaces.update(archive.spaceId, { status: 'ARCHIVE_FAILED' });
+      await this.spaces.notify(
         archive.ownerId,
         archive.spaceId,
         'ARCHIVE_FAILED',
         `Archiving failed for "${space.name}"`,
         'You can retry from the admin console. The Space is preserved until archiving succeeds.',
       );
-      this.db.activity.append({
+      await this.db.activity.append({
         userId: archive.ownerId,
         spaceId: archive.spaceId,
         fileId: null,
@@ -198,16 +198,17 @@ export class ArchiveService {
   }
 
   async download(actor: AuthUser, archiveId: string): Promise<SignedDownload> {
-    const archive = this.db.archives.findById(archiveId);
+    const archive = await this.db.archives.findById(archiveId);
     if (!archive) throw new AppError('ARCHIVE_NOT_FOUND', 'Archive not found');
-    if (archive.ownerId !== actor.id && this.db.auth.findById(actor.id)?.role !== 'ADMIN') {
+    if (archive.ownerId !== actor.id && (await this.db.auth.findById(actor.id))?.role !== 'ADMIN') {
       throw new AppError('SPACE_ACCESS_DENIED', 'Only the Space owner can download this archive');
     }
     if (archive.status !== 'VERIFIED') {
       throw new AppError('ARCHIVE_NOT_VERIFIED', 'Archive is not verified for download yet');
     }
     await this.storage.headObject(archive.objectKey);
-    const name = `${this.db.spaces.findById(archive.spaceId)?.name ?? 'space'}-archive.zip`;
+    const space = await this.db.spaces.findById(archive.spaceId);
+    const name = `${space?.name ?? 'space'}-archive.zip`;
     return this.storage.createSignedDownloadUrl(archive.objectKey, 300, sanitizeArchiveName(name));
   }
 }
@@ -215,4 +216,3 @@ export class ArchiveService {
 function sanitizeArchiveName(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 120);
 }
-

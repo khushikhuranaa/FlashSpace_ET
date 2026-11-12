@@ -27,7 +27,7 @@ export function spaceRoutes(
   router.get(
     '/spaces',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ spaces: spaces.listForUser(req.user!.id) });
+      res.json({ spaces: await spaces.listForUser(req.user!.id) });
     }),
   );
 
@@ -42,7 +42,7 @@ export function spaceRoutes(
         throw new AppError('VALIDATION_ERROR', 'startAt and expiryAt ISO datetimes are required');
       }
       res.status(201).json({
-        space: spaces.create(req.user!, {
+        space: await spaces.create(req.user!, {
           name: name.trim(),
           purpose: purpose.trim(),
           description: typeof description === 'string' ? description : '',
@@ -56,7 +56,7 @@ export function spaceRoutes(
   router.get(
     '/spaces/:spaceId',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ space: spaces.getForUser(parseId(req, 'spaceId'), req.user!.id) });
+      res.json({ space: await spaces.getForUser(parseId(req, 'spaceId'), req.user!.id) });
     }),
   );
 
@@ -65,7 +65,7 @@ export function spaceRoutes(
     asyncHandler(async (req: Request, res: Response) => {
       const { name, purpose, description, expiryAt } = req.body as Record<string, unknown>;
       res.json({
-        space: spaces.update(req.user!, parseId(req, 'spaceId'), {
+        space: await spaces.update(req.user!, parseId(req, 'spaceId'), {
           ...(typeof name === 'string' ? { name } : {}),
           ...(typeof purpose === 'string' ? { purpose } : {}),
           ...(typeof description === 'string' ? { description } : {}),
@@ -78,7 +78,7 @@ export function spaceRoutes(
   router.delete(
     '/spaces/:spaceId',
     asyncHandler(async (req: Request, res: Response) => {
-      spaces.delete(req.user!, parseId(req, 'spaceId'));
+      await spaces.delete(req.user!, parseId(req, 'spaceId'));
       res.status(204).end();
     }),
   );
@@ -96,7 +96,7 @@ export function spaceRoutes(
   router.get(
     '/spaces/:spaceId/members',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json(membership.membersPayload(req.user!, parseId(req, 'spaceId')));
+      res.json(await membership.membersPayload(req.user!, parseId(req, 'spaceId')));
     }),
   );
 
@@ -107,7 +107,7 @@ export function spaceRoutes(
       if (typeof email !== 'string' || (role !== 'EDITOR' && role !== 'VIEWER')) {
         throw new AppError('VALIDATION_ERROR', 'email and role (EDITOR|VIEWER) are required');
       }
-      const result = membership.invite(req.user!, parseId(req, 'spaceId'), email, role);
+      const result = await membership.invite(req.user!, parseId(req, 'spaceId'), email, role);
       res.status(202).json(result);
     }),
   );
@@ -120,14 +120,14 @@ export function spaceRoutes(
       if (role !== undefined && role !== 'EDITOR' && role !== 'VIEWER') {
         throw new AppError('VALIDATION_ERROR', 'role must be EDITOR or VIEWER');
       }
-      res.json({ inviteLink: membership.createInviteLink(req.user!, parseId(req, 'spaceId'), role ?? 'VIEWER') });
+      res.json({ inviteLink: await membership.createInviteLink(req.user!, parseId(req, 'spaceId'), role ?? 'VIEWER') });
     }),
   );
 
   router.delete(
     '/spaces/:spaceId/invite-link',
     asyncHandler(async (req: Request, res: Response) => {
-      membership.revokeInviteLink(req.user!, parseId(req, 'spaceId'));
+      await membership.revokeInviteLink(req.user!, parseId(req, 'spaceId'));
       res.status(204).end();
     }),
   );
@@ -135,7 +135,7 @@ export function spaceRoutes(
   router.get(
     '/spaces/:spaceId/join-requests',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ requests: membership.listJoinRequests(req.user!, parseId(req, 'spaceId')) });
+      res.json({ requests: await membership.listJoinRequests(req.user!, parseId(req, 'spaceId')) });
     }),
   );
 
@@ -146,14 +146,14 @@ export function spaceRoutes(
       if (role !== 'EDITOR' && role !== 'VIEWER') {
         throw new AppError('VALIDATION_ERROR', 'role must be EDITOR or VIEWER');
       }
-      res.json({ member: spaces.changeRole(req.user!, parseId(req, 'spaceId'), parseId(req, 'userId'), role) });
+      res.json({ member: await spaces.changeRole(req.user!, parseId(req, 'spaceId'), parseId(req, 'userId'), role) });
     }),
   );
 
   router.delete(
     '/spaces/:spaceId/members/:userId',
     asyncHandler(async (req: Request, res: Response) => {
-      spaces.revoke(req.user!, parseId(req, 'spaceId'), parseId(req, 'userId'));
+      await spaces.revoke(req.user!, parseId(req, 'spaceId'), parseId(req, 'userId'));
       res.status(204).end();
     }),
   );
@@ -161,7 +161,7 @@ export function spaceRoutes(
   router.get(
     '/spaces/:spaceId/activity',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ activity: spaces.listActivity(parseId(req, 'spaceId'), req.user!.id) });
+      res.json({ activity: await spaces.listActivity(parseId(req, 'spaceId'), req.user!.id) });
     }),
   );
 
@@ -170,14 +170,14 @@ export function spaceRoutes(
   router.get(
     '/join-links/:token',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ space: membership.previewInviteLink(req.user!, parseId(req, 'token')) });
+      res.json({ space: await membership.previewInviteLink(req.user!, parseId(req, 'token')) });
     }),
   );
 
   router.post(
     '/join-links/:token/requests',
     asyncHandler(async (req: Request, res: Response) => {
-      res.status(201).json({ request: membership.requestJoinByLink(req.user!, parseId(req, 'token')) });
+      res.status(201).json({ request: await membership.requestJoinByLink(req.user!, parseId(req, 'token')) });
     }),
   );
 
@@ -188,7 +188,7 @@ export function spaceRoutes(
       if (decision !== 'ACCEPT' && decision !== 'DECLINE') {
         throw new AppError('VALIDATION_ERROR', 'decision must be ACCEPT or DECLINE');
       }
-      res.json({ request: membership.decide(req.user!, parseId(req, 'requestId'), decision) });
+      res.json({ request: await membership.decide(req.user!, parseId(req, 'requestId'), decision) });
     }),
   );
 
@@ -197,7 +197,7 @@ export function spaceRoutes(
   router.get(
     '/spaces/:spaceId/folders',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ folders: spaces.listFolders(parseId(req, 'spaceId'), req.user!.id) });
+      res.json({ folders: await spaces.listFolders(parseId(req, 'spaceId'), req.user!.id) });
     }),
   );
 
@@ -212,7 +212,7 @@ export function spaceRoutes(
         throw new AppError('VALIDATION_ERROR', 'parentId must be a string or null');
       }
       res.status(201).json({
-        folder: spaces.createFolder(req.user!, parseId(req, 'spaceId'), {
+        folder: await spaces.createFolder(req.user!, parseId(req, 'spaceId'), {
           name,
           parentId: (parentId as string | null | undefined) ?? null,
         }),
@@ -225,7 +225,7 @@ export function spaceRoutes(
   router.get(
     '/spaces/:spaceId/files',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ files: files.list(req.user!, parseId(req, 'spaceId')) });
+      res.json({ files: await files.list(req.user!, parseId(req, 'spaceId')) });
     }),
   );
 
@@ -291,14 +291,14 @@ export function spaceRoutes(
       if (typeof requestedDays !== 'number' || typeof reason !== 'string') {
         throw new AppError('VALIDATION_ERROR', 'requestedDays (number) and reason are required');
       }
-      res.status(201).json({ request: extensions.request(req.user!, parseId(req, 'spaceId'), requestedDays, reason) });
+      res.status(201).json({ request: await extensions.request(req.user!, parseId(req, 'spaceId'), requestedDays, reason) });
     }),
   );
 
   router.get(
     '/spaces/:spaceId/extensions',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ requests: extensions.listForSpace(req.user!, parseId(req, 'spaceId')) });
+      res.json({ requests: await extensions.listForSpace(req.user!, parseId(req, 'spaceId')) });
     }),
   );
 

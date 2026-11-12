@@ -45,6 +45,14 @@ export interface Env {
   smtpFrom: string;
 }
 
+/**
+ * Values that are convenient for local demos but unsafe anywhere real: with
+ * these secrets anyone can forge a session token for any user (including an
+ * ADMIN) or trigger the lifecycle job endpoint. Production must override both.
+ */
+const DEV_AUTH_SECRET = 'dev-only-insecure-secret';
+const DEV_JOB_SECRET = 'dev-only-job-secret';
+
 function num(v: string | undefined, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -66,8 +74,8 @@ export function loadEnv(overrides: Partial<Env> = {}): Env {
     signedUrlBase: process.env.SIGNED_URL_BASE ?? '',
     webOrigin: process.env.WEB_ORIGIN ?? '*',
     webAppUrl: process.env.WEB_APP_URL ?? 'http://localhost:5173',
-    localAuthSecret: process.env.LOCAL_AUTH_SECRET ?? 'dev-only-insecure-secret',
-    jobSecret: process.env.JOB_SECRET ?? 'dev-only-job-secret',
+    localAuthSecret: process.env.LOCAL_AUTH_SECRET ?? DEV_AUTH_SECRET,
+    jobSecret: process.env.JOB_SECRET ?? DEV_JOB_SECRET,
     fileMaxBytes: num(process.env.FILE_MAX_BYTES, 50 * 1024 * 1024),
     spaceMaxBytes: num(process.env.SPACE_MAX_BYTES, 250 * 1024 * 1024),
     maxActiveSpacesPerUser: num(process.env.MAX_ACTIVE_SPACES_PER_USER, 20),
@@ -81,5 +89,23 @@ export function loadEnv(overrides: Partial<Env> = {}): Env {
     smtpFrom: process.env.SMTP_FROM ?? 'flashspace@localhost',
     ...overrides,
   };
+
+  // Fail fast instead of silently shipping forgeable credentials. The old
+  // behaviour booted a "production" API that accepted tokens signed with a
+  // publicly known string.
+  if (env.nodeEnv === 'production') {
+    if (!env.localAuthSecret || env.localAuthSecret === DEV_AUTH_SECRET) {
+      throw new Error(
+        'LOCAL_AUTH_SECRET must be set to a strong random value when NODE_ENV=production',
+      );
+    }
+    if (!env.jobSecret || env.jobSecret === DEV_JOB_SECRET) {
+      throw new Error('JOB_SECRET must be set to a strong random value when NODE_ENV=production');
+    }
+    if (env.webOrigin === '*') {
+      throw new Error('WEB_ORIGIN must list the web app origin(s) when NODE_ENV=production');
+    }
+  }
+
   return env;
 }

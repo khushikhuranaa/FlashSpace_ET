@@ -49,4 +49,12 @@ export class MemoryDataLayer implements DataLayer {
   readonly archivePlans = new MemoryArchivePlansRepo();
   readonly archiveJobs = new MemoryArchiveJobsRepo();
   readonly notificationBus = new NotificationBus();
+
+  /**
+   * Local backends resolve immediately; the contract allows a Promise for the
+   * PostgreSQL layer, which needs a real round-trip here.
+   */
+  healthCheck(): void {
+    // Nothing to probe: the in-memory stores cannot be unreachable.
+  }
 }

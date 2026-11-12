@@ -1334,6 +1334,23 @@ export class SqliteDataLayer implements DataLayer {
       },
       listForSpace: (spaceId) =>
         all('SELECT * FROM cleanup_runs WHERE space_id = ? ORDER BY started_at DESC', spaceId).map(mapCleanupRun),
+      update: (id, patch) => {
+        const row = get('SELECT * FROM cleanup_runs WHERE id = ?', id);
+        if (!row) return undefined;
+        const next = { ...mapCleanupRun(row), ...patch };
+        run(
+          `UPDATE cleanup_runs
+             SET status = ?, memberships_revoked = ?, objects_deleted = ?, finished_at = ?, error = ?
+           WHERE id = ?`,
+          next.status,
+          next.membershipsRevoked,
+          next.objectsDeleted,
+          next.finishedAt,
+          next.error,
+          id,
+        );
+        return next;
+      },
     };
 
     this.activity = {
@@ -1623,6 +1640,14 @@ export class SqliteDataLayer implements DataLayer {
     if (!archiveColumns.has('checksum')) {
       this.db.exec('ALTER TABLE archives ADD COLUMN checksum TEXT');
     }
+  }
+
+  /**
+   * Cheapest possible round-trip to the file, used by GET /ready. Runs a real
+   * statement so a corrupt or locked database is reported instead of assumed.
+   */
+  healthCheck(): void {
+    this.db.prepare('SELECT 1 AS ok').get();
   }
 
   /** Closes the underlying database file (tests + graceful shutdown). */

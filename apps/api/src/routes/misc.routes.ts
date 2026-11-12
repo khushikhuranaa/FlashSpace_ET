@@ -19,7 +19,7 @@ export function miscRoutes(
   router.get(
     '/storage/summary',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ storage: storage.summary(req.user!) });
+      res.json({ storage: await storage.summary(req.user!) });
     }),
   );
 
@@ -28,30 +28,35 @@ export function miscRoutes(
   router.get(
     '/notifications',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ notifications: db.notifications.listForUser(req.user!.id) });
+      res.json({ notifications: await db.notifications.listForUser(req.user!.id) });
     }),
   );
 
   router.post(
     '/notifications/:notificationId/read',
     asyncHandler(async (req: Request, res: Response) => {
-      const n = db.notifications.markRead(req.params.notificationId!);
-      if (!n || n.userId !== req.user!.id) throw new AppError('NOT_FOUND', 'Notification not found');
-      res.json({ notification: n });
+      // Ownership is checked BEFORE the write: marking first let any signed-in
+      // user flip another user's notification to "read".
+      const notificationId = req.params.notificationId!;
+      const existing = await db.notifications.findById(notificationId);
+      if (!existing || existing.userId !== req.user!.id) {
+        throw new AppError('NOT_FOUND', 'Notification not found');
+      }
+      res.json({ notification: (await db.notifications.markRead(notificationId))! });
     }),
   );
 
   router.post(
     '/notifications/read-all',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ updated: db.notifications.markAllRead(req.user!.id) });
+      res.json({ updated: await db.notifications.markAllRead(req.user!.id) });
     }),
   );
 
   router.get(
     '/notifications/unread',
     asyncHandler(async (req: Request, res: Response) => {
-      const count = db.notifications.listForUser(req.user!.id).filter((n) => !n.readAt).length;
+      const count = (await db.notifications.listForUser(req.user!.id)).filter((n) => !n.readAt).length;
       res.json({ unread: count });
     }),
   );
@@ -78,7 +83,7 @@ export function miscRoutes(
     '/admin/extensions/pending',
     requireAdmin,
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ requests: extensions.listPending(req.user!) });
+      res.json({ requests: await extensions.listPending(req.user!) });
     }),
   );
 
@@ -90,7 +95,7 @@ export function miscRoutes(
       if (decision !== 'APPROVED' && decision !== 'REJECTED') {
         throw new AppError('VALIDATION_ERROR', 'decision must be APPROVED or REJECTED');
       }
-      res.json({ request: extensions.decide(req.user!, req.params.requestId!, decision) });
+      res.json({ request: await extensions.decide(req.user!, req.params.requestId!, decision) });
     }),
   );
 

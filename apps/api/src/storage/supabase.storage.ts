@@ -3,6 +3,15 @@ import { Readable } from 'node:stream';
 import { AppError } from '@flashspace/shared';
 import type { SignedUrl, StorageAdapter, StoredObjectInfo } from './storage.interface.js';
 
+/** Supabase signs upload URLs for a fixed window (2 hours). */
+const SUPABASE_SIGNED_UPLOAD_TTL_SECONDS = 2 * 60 * 60;
+/**
+ * Supabase's JS client uploads from memory, so this adapter buffers each object.
+ * Refuse anything larger instead of risking an out-of-memory crash; a streaming
+ * S3/R2 adapter is the right choice for full-size Space archives.
+ */
+const MAX_BUFFERED_UPLOAD_BYTES = 64 * 1024 * 1024;
+
 /**
  * Supabase Storage adapter (free tier). Uses the service role key server-side
  * only. Signed upload/download URLs are short-lived; the browser never receives
@@ -23,17 +32,21 @@ export class SupabaseStorageAdapter implements StorageAdapter {
   }
 
   async createSignedUploadUrl(key: string, expiresInSeconds: number): Promise<SignedUrl> {
-    // supabase-js v2 types this as (key) with options object { expiresIn };
-    // accept both shapes at runtime while satisfying the strict type.
+    // supabase-js v2 signature: createSignedUploadUrl(path, { upsert }) — there is
+    // no expiry argument. The previous version cast the TTL into { upsert } so the
+    // compiler was satisfied while the SDK silently received a number as options.
     const { data, error } = await this.client.storage
       .from(this.bucket)
-      .createSignedUploadUrl(key, expiresInSeconds as unknown as { upsert: boolean } & { expiresIn?: number });
+      .createSignedUploadUrl(key, { upsert: false });
     if (error || !data) {
       throw new AppError('STORAGE_ERROR', `Failed to create upload URL: ${error?.message ?? 'unknown'}`);
     }
+    // Supabase signs upload URLs for a fixed 2 hours; report the real lifetime
+    // instead of the (shorter) value the caller asked for.
+    const ttlSeconds = Math.min(expiresInSeconds, SUPABASE_SIGNED_UPLOAD_TTL_SECONDS);
     return {
       url: data.signedUrl,
-      expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
     };
   }
 
@@ -57,9 +70,16 @@ export class SupabaseStorageAdapter implements StorageAdapter {
   }
 
   async putObject(key: string, body: Readable | Buffer): Promise<StoredObjectInfo> {
-    // Buffer the stream: Supabase JS upload takes Blob/Buffer. Archives are
-    // chunked by the archive engine to keep peak memory bounded.
-    const payload = Buffer.isBuffer(body) ? body : await streamToBuffer(body);
+    // Supabase JS upload takes a Buffer/Blob, so this adapter cannot stream: the
+    // whole object is held in memory. Cap it so a large Space archive fails with
+    // a clear error instead of exhausting the API process's heap.
+    if (Buffer.isBuffer(body) && body.length > MAX_BUFFERED_UPLOAD_BYTES) {
+      throw new AppError(
+        'STORAGE_ERROR',
+        `Object is ${Math.round(body.length / 1024 / 1024)} MB, above the ${Math.round(MAX_BUFFERED_UPLOAD_BYTES / 1024 / 1024)} MB in-memory limit of the Supabase adapter. Use an S3/R2 adapter for larger archives.`,
+      );
+    }
+    const payload = Buffer.isBuffer(body) ? body : await streamToBuffer(body, MAX_BUFFERED_UPLOAD_BYTES);
     const { error } = await this.client.storage.from(this.bucket).upload(key, payload, {
       upsert: true,
       contentType: 'application/octet-stream',
@@ -112,10 +132,20 @@ export class SupabaseStorageAdapter implements StorageAdapter {
   }
 }
 
-async function streamToBuffer(stream: Readable): Promise<Buffer> {
+async function streamToBuffer(stream: Readable, maxBytes: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of stream) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    total += buf.length;
+    if (total > maxBytes) {
+      // Abort early rather than buffering the whole object first.
+      throw new AppError(
+        'STORAGE_ERROR',
+        `Upload exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB in-memory limit of the Supabase adapter.`,
+      );
+    }
+    chunks.push(buf);
   }
   return Buffer.concat(chunks);
 }

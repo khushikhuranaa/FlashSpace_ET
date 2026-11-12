@@ -4,6 +4,7 @@ import type { AuthUser, Archive } from '@flashspace/shared';
 import { AppError, ACTIVITY_ACTIONS, STORAGE_PATHS } from '@flashspace/shared';
 import type { DataLayer } from '../repositories/data-layer.interface.js';
 import type { ArchivePlanRow, ArchiveJobRow, ScanJobRow } from '../repositories/data-layer.interface.js';
+import type { Space, FileRecord } from '@flashspace/shared';
 import { newId } from '../utils/ids.js';
 import { zipStream, type ZipEntry } from '../utils/zip.js';
 import { folderPathFor, uniqueEntryName } from '../utils/folder-path.js';
@@ -12,7 +13,8 @@ import type { StorageAdapter } from '../storage/index.js';
 import type { ArchiveService } from './archive.service.js';
 import type { ArchivePlanView, ArchiveJobView, PlanReview } from './scan.types.js';
 
-/** Selective archive plan engine (PRD §4, §5, §6).
+/**
+ * Selective archive plan engine (PRD §4, §5, §6).
  *
  *  The default behaviour is a FULL archive: if the owner has made no exclusions,
  *  every active file (including duplicates) is packaged into the ZIP. Exclusions
@@ -38,19 +40,23 @@ export class ArchivePlanService {
     private readonly archive: ArchiveService,
   ) {}
 
-  async createPlan(actor: AuthUser, spaceId: string, input: { scanId?: string; excludedFileIds?: string[]; explained: boolean }): Promise<ArchivePlanView> {
-    this.spaces.requireRole(spaceId, actor.id, ['OWNER']);
-    const space = this.db.spaces.findById(spaceId);
+  async createPlan(
+    actor: AuthUser,
+    spaceId: string,
+    input: { scanId?: string; excludedFileIds?: string[]; explained: boolean },
+  ): Promise<ArchivePlanView> {
+    await this.spaces.requireRole(spaceId, actor.id, ['OWNER']);
+    const space = await this.db.spaces.findById(spaceId);
     if (!space || space.status === 'DELETED') throw new AppError('SPACE_NOT_FOUND', 'Space not found');
     this.spaces.assertWritable(space);
 
     // If there is already a non-terminal plan for this space, return it (idempotent creator).
-    const existing = this.db.archivePlans.listForSpace(spaceId).find(
+    const existing = (await this.db.archivePlans.listForSpace(spaceId)).find(
       (p) => p.status === 'PENDING' || p.status === 'CONFIRMED' || p.status === 'ARCHIVING',
     );
     if (existing) return this.toPlanView(existing);
 
-    const activeFiles = this.db.files.listActiveForSpace(spaceId);
+    const activeFiles = await this.db.files.listActiveForSpace(spaceId);
     const excludedSet = new Set(input.excludedFileIds ?? []);
     // Validate excluded ids belong to this space's active files.
     for (const id of excludedSet) {
@@ -85,10 +91,16 @@ export class ArchivePlanService {
       createdAt: now,
       updatedAt: now,
     };
-    this.db.archivePlans.insert(plan);
+    await this.db.archivePlans.insert(plan);
 
-    this.spaces.notify(space.ownerId, spaceId, 'PLAN_CREATED', `Archive plan created for "${space.name}"`, `Will archive ${willArchive.length} file(s); ${willExclude.length} excluded (${this.fmt(willExcludeBytes)}).`);
-    this.db.activity.append({
+    await this.spaces.notify(
+      space.ownerId,
+      spaceId,
+      'PLAN_CREATED',
+      `Archive plan created for "${space.name}"`,
+      `Will archive ${willArchive.length} file(s); ${willExclude.length} excluded (${this.fmt(willExcludeBytes)}).`,
+    );
+    await this.db.activity.append({
       userId: actor.id,
       spaceId,
       fileId: null,
@@ -100,8 +112,8 @@ export class ArchivePlanService {
   }
 
   async confirmPlan(actor: AuthUser, planId: string): Promise<PlanReview> {
-    this.spaces.requireRoleForPlan(planId, actor.id, this.db);
-    const plan = this.db.archivePlans.findById(planId);
+    await this.spaces.requireRoleForPlan(planId, actor.id, this.db);
+    const plan = await this.db.archivePlans.findById(planId);
     if (!plan) throw new AppError('NOT_FOUND', 'Plan not found');
     if (plan.status !== 'PENDING') {
       throw new AppError('CONFLICT', `Plan is already ${plan.status}`);
@@ -110,39 +122,48 @@ export class ArchivePlanService {
       throw new AppError('VALIDATION_ERROR', 'You must confirm you understand the exclusion consequences before archiving');
     }
 
-    const space = this.db.spaces.findById(plan.spaceId);
+    const space = await this.db.spaces.findById(plan.spaceId);
     if (!space) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
 
     // Mark CONFIRMED, then spawn the archive job (idempotent by plan).
-    const updated = this.db.archivePlans.update(plan.id, { status: 'CONFIRMED', confirmedAt: new Date().toISOString() });
-    const review = await this.spawnArchiveJob(actor, updated!);
-    return review;
+    const updated = await this.db.archivePlans.update(plan.id, {
+      status: 'CONFIRMED',
+      confirmedAt: new Date().toISOString(),
+    });
+    return this.spawnArchiveJob(actor, updated!);
   }
 
   async cancelPlan(actor: AuthUser, planId: string): Promise<ArchivePlanView> {
-    this.spaces.requireRoleForPlan(planId, actor.id, this.db);
-    const plan = this.db.archivePlans.findById(planId);
+    await this.spaces.requireRoleForPlan(planId, actor.id, this.db);
+    const plan = await this.db.archivePlans.findById(planId);
     if (!plan) throw new AppError('NOT_FOUND', 'Plan not found');
     if (plan.status !== 'PENDING' && plan.status !== 'CONFIRMED') {
       throw new AppError('CONFLICT', `Plan cannot be cancelled in status ${plan.status}`);
     }
-    const updated = this.db.archivePlans.update(plan.id, { status: 'CANCELLED' });
-    this.spaces.notify(plan.ownerId, plan.spaceId, 'PLAN_CANCELLED', `Archive plan cancelled for "${this.db.spaces.findById(plan.spaceId)?.name ?? 'Space'}"`, 'No archive was created.');
+    const updated = await this.db.archivePlans.update(plan.id, { status: 'CANCELLED' });
+    const space = await this.db.spaces.findById(plan.spaceId);
+    await this.spaces.notify(
+      plan.ownerId,
+      plan.spaceId,
+      'PLAN_CANCELLED',
+      `Archive plan cancelled for "${space?.name ?? 'Space'}"`,
+      'No archive was created.',
+    );
     return this.toPlanView(updated!);
   }
 
   async retryFailedPlan(admin: AuthUser, planId: string): Promise<PlanReview> {
-    const adminProfile = this.db.auth.findById(admin.id);
+    const adminProfile = await this.db.auth.findById(admin.id);
     if (!adminProfile || adminProfile.role !== 'ADMIN') throw new AppError('ADMIN_REQUIRED', 'Admin access required');
-    const plan = this.db.archivePlans.findById(planId);
+    const plan = await this.db.archivePlans.findById(planId);
     if (!plan) throw new AppError('NOT_FOUND', 'Plan not found');
     if (plan.status !== 'FAILED') throw new AppError('CONFLICT', `Plan is not in a retryable state (${plan.status})`);
 
-    const space = this.db.spaces.findById(plan.spaceId);
+    const space = await this.db.spaces.findById(plan.spaceId);
     if (!space) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
     if (space.status === 'DELETED') throw new AppError('SPACE_NOT_WRITABLE', 'Space has been deleted');
 
-    this.db.activity.append({
+    await this.db.activity.append({
       userId: admin.id,
       spaceId: plan.spaceId,
       fileId: null,
@@ -153,52 +174,74 @@ export class ArchivePlanService {
 
     // A failed plan normally still owns its previous job row. Reusing that row
     // keeps retries idempotent: one job per plan, no duplicate archives.
-    const previousJob = this.db.archiveJobs.findByPlanId(plan.id);
+    const previousJob = await this.db.archiveJobs.findByPlanId(plan.id);
     if (previousJob) {
       const now = new Date().toISOString();
-      this.db.archivePlans.update(plan.id, { status: 'ARCHIVING', errorMessage: null, updatedAt: now });
-      this.db.archiveJobs.update(previousJob.id, {
+      await this.db.archivePlans.update(plan.id, { status: 'ARCHIVING', errorMessage: null, updatedAt: now });
+      await this.db.archiveJobs.update(previousJob.id, {
         status: 'RUNNING',
         attempts: previousJob.attempts + 1,
         startedAt: now,
         finishedAt: null,
         error: null,
       });
-      return this.runJob(actor, this.db.archivePlans.findById(plan.id)!, previousJob.id);
+      return this.runJob(actor, (await this.db.archivePlans.findById(plan.id))!, previousJob.id);
     }
 
-    const revived = this.db.archivePlans.update(plan.id, { status: 'CONFIRMED', errorMessage: null, updatedAt: new Date().toISOString() });
-    this.spaces.notify(plan.ownerId, plan.spaceId, 'PLAN_CREATED', `A failed archive plan for "${space.name}" is ready to retry`, 'Review and confirm to try again.');
+    const revived = await this.db.archivePlans.update(plan.id, {
+      status: 'CONFIRMED',
+      errorMessage: null,
+      updatedAt: new Date().toISOString(),
+    });
+    await this.spaces.notify(
+      plan.ownerId,
+      plan.spaceId,
+      'PLAN_CREATED',
+      `A failed archive plan for "${space.name}" is ready to retry`,
+      'Review and confirm to try again.',
+    );
     return this.spawnArchiveJob(actor, revived!);
   }
 
   async getPlanReview(actor: AuthUser, planId: string): Promise<PlanReview> {
-    this.spaces.requireRoleForPlan(planId, actor.id, this.db);
-    const plan = this.db.archivePlans.findById(planId);
+    await this.spaces.requireRoleForPlan(planId, actor.id, this.db);
+    const plan = await this.db.archivePlans.findById(planId);
     if (!plan) throw new AppError('NOT_FOUND', 'Plan not found');
-    const space = this.db.spaces.findById(plan.spaceId);
+    const space = await this.db.spaces.findById(plan.spaceId);
     if (!space) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
-    const scan = plan.scanId ? this.db.scanJobs.findById(plan.scanId) ?? null : null;
-    const archiveJob = plan.archiveJobId ? this.db.archiveJobs.findById(plan.archiveJobId) ?? null : null;
-    return { plan: this.toPlanView(plan), spaceName: space.name, scan: scan ? this.toScanView(scan) : null, archiveJob: archiveJob ? this.toArchiveJobView(archiveJob) : null };
+    const scan = plan.scanId ? (await this.db.scanJobs.findById(plan.scanId)) ?? null : null;
+    const archiveJob = plan.archiveJobId ? (await this.db.archiveJobs.findById(plan.archiveJobId)) ?? null : null;
+    return {
+      plan: this.toPlanView(plan),
+      spaceName: space.name,
+      scan: scan ? this.toScanView(scan) : null,
+      archiveJob: archiveJob ? this.toArchiveJobView(archiveJob) : null,
+    };
   }
 
   async getPlansForSpace(actor: AuthUser, spaceId: string): Promise<ArchivePlanView[]> {
-    this.spaces.requireRole(spaceId, actor.id, ['OWNER', 'EDITOR', 'VIEWER']);
-    if (!this.db.spaces.findById(spaceId)) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
-    return this.db.archivePlans.listForSpace(spaceId).map(this.toPlanView);
+    await this.spaces.requireRole(spaceId, actor.id, ['OWNER', 'EDITOR', 'VIEWER']);
+    if (!(await this.db.spaces.findById(spaceId))) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
+    const plans = await this.db.archivePlans.listForSpace(spaceId);
+    return plans.map((p) => this.toPlanView(p));
   }
 
   // ---- internals ---------------------------------------------------------
 
   private async spawnArchiveJob(actor: AuthUser, plan: ArchivePlanRow): Promise<PlanReview> {
-    const space = this.db.spaces.findById(plan.spaceId);
+    const space = await this.db.spaces.findById(plan.spaceId);
     if (!space) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
 
     // Idempotent by plan: if a job already exists for this plan, return its review.
-    const existingJob = this.db.archiveJobs.findByPlanId(plan.id);
+    const existingJob = await this.db.archiveJobs.findByPlanId(plan.id);
     if (existingJob) {
-      return { plan: this.toPlanView(plan), spaceName: space.name, scan: plan.scanId ? (this.db.scanJobs.findById(plan.scanId) ?? null) : null, archiveJob: this.toArchiveJobView(existingJob) };
+      const scan = plan.scanId ? (await this.db.scanJobs.findById(plan.scanId)) ?? null : null;
+      return {
+        plan: this.toPlanView(plan),
+        spaceName: space.name,
+        scan: scan ? this.toScanView(scan) : null,
+        archiveJob: this.toArchiveJobView(existingJob),
+      };
     }
 
     const jobId = newId();
@@ -216,10 +259,10 @@ export class ArchivePlanService {
       finishedAt: null,
       error: null,
     };
-    this.db.archiveJobs.insert(job);
-    this.db.archivePlans.update(plan.id, { status: 'ARCHIVING', archiveJobId: jobId, updatedAt: now });
+    await this.db.archiveJobs.insert(job);
+    await this.db.archivePlans.update(plan.id, { status: 'ARCHIVING', archiveJobId: jobId, updatedAt: now });
 
-    this.db.activity.append({
+    await this.db.activity.append({
       userId: actor.id,
       spaceId: plan.spaceId,
       fileId: null,
@@ -232,29 +275,61 @@ export class ArchivePlanService {
 
   /** Runs (or re-runs) the ZIP creation for a plan's job. */
   private async runJob(actor: AuthUser, plan: ArchivePlanRow, jobId: string): Promise<PlanReview> {
-    const space = this.db.spaces.findById(plan.spaceId);
+    const space = await this.db.spaces.findById(plan.spaceId);
     if (!space) throw new AppError('SPACE_NOT_FOUND', 'Space not found');
     try {
       // buildAndStoreArchive verifies the ZIP, stores it in the owner's Vault,
       // persists the archive row and only then flips the Space to ARCHIVED.
       const archive = await this.buildAndStoreArchive(actor, plan, space);
-      this.db.archiveJobs.update(jobId, { status: 'SUCCEEDED', archiveId: archive.id, finishedAt: new Date().toISOString() });
-      this.db.archivePlans.update(plan.id, { status: 'VERIFIED', updatedAt: new Date().toISOString() });
-      this.spaces.notify(plan.ownerId, plan.spaceId, 'ARCHIVE_PLAN_CONFIRMED', `Archive verified for "${space.name}"`, `A ${this.fmt(archive.sizeBytes)} archive with ${archive.fileCount} file(s) is now in your Vault.`);
-      this.db.activity.append({
+      await this.db.archiveJobs.update(jobId, {
+        status: 'SUCCEEDED',
+        archiveId: archive.id,
+        finishedAt: new Date().toISOString(),
+      });
+      await this.db.archivePlans.update(plan.id, { status: 'VERIFIED', updatedAt: new Date().toISOString() });
+      await this.spaces.notify(
+        plan.ownerId,
+        plan.spaceId,
+        'ARCHIVE_PLAN_CONFIRMED',
+        `Archive verified for "${space.name}"`,
+        `A ${this.fmt(archive.sizeBytes)} archive with ${archive.fileCount} file(s) is now in your Vault.`,
+      );
+      await this.db.activity.append({
         userId: actor.id,
         spaceId: plan.spaceId,
         fileId: null,
         action: ACTIVITY_ACTIONS.ARCHIVE_JOB_SUCCEEDED,
-        metadata: { planId: plan.id, jobId, archiveId: archive.id, fileCount: archive.fileCount, sizeBytes: archive.sizeBytes },
+        metadata: {
+          planId: plan.id,
+          jobId,
+          archiveId: archive.id,
+          fileCount: archive.fileCount,
+          sizeBytes: archive.sizeBytes,
+        },
       });
-      return { plan: this.toPlanView(this.db.archivePlans.findById(plan.id)!), spaceName: space.name, scan: plan.scanId ? (this.db.scanJobs.findById(plan.scanId) ?? null) : null, archiveJob: this.toArchiveJobView(this.db.archiveJobs.findById(jobId)!) };
+      const scan = plan.scanId ? (await this.db.scanJobs.findById(plan.scanId)) ?? null : null;
+      return {
+        plan: this.toPlanView((await this.db.archivePlans.findById(plan.id))!),
+        spaceName: space.name,
+        scan: scan ? this.toScanView(scan) : null,
+        archiveJob: this.toArchiveJobView((await this.db.archiveJobs.findById(jobId))!),
+      };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.db.archiveJobs.update(jobId, { status: 'FAILED', error: message, finishedAt: new Date().toISOString() });
-      this.db.archivePlans.update(plan.id, { status: 'FAILED', errorMessage: message, updatedAt: new Date().toISOString() });
-      this.spaces.notify(plan.ownerId, plan.spaceId, 'ARCHIVE_PLAN_FAILED', `Archiving failed for "${space.name}"`, 'Your Space and files are preserved. You can retry from the Space details.');
-      this.db.activity.append({
+      await this.db.archiveJobs.update(jobId, { status: 'FAILED', error: message, finishedAt: new Date().toISOString() });
+      await this.db.archivePlans.update(plan.id, {
+        status: 'FAILED',
+        errorMessage: message,
+        updatedAt: new Date().toISOString(),
+      });
+      await this.spaces.notify(
+        plan.ownerId,
+        plan.spaceId,
+        'ARCHIVE_PLAN_FAILED',
+        `Archiving failed for "${space.name}"`,
+        'Your Space and files are preserved. You can retry from the Space details.',
+      );
+      await this.db.activity.append({
         userId: actor.id,
         spaceId: plan.spaceId,
         fileId: null,
@@ -265,18 +340,23 @@ export class ArchivePlanService {
     }
   }
 
-  private async buildAndStoreArchive(actor: AuthUser, plan: ArchivePlanRow, space: { id: string; name: string; ownerId: string }): Promise<Archive> {
-    const activeFiles = this.db.files.listActiveForSpace(space.id);
+  private async buildAndStoreArchive(
+    actor: AuthUser,
+    plan: ArchivePlanRow,
+    space: Pick<Space, 'id' | 'name' | 'ownerId'>,
+  ): Promise<Archive> {
+    const activeFiles: FileRecord[] = await this.db.files.listActiveForSpace(space.id);
     const excludedSet = new Set(plan.excludedFileIds);
     const selected = activeFiles.filter((f) => !excludedSet.has(f.id));
 
     // Preserve the original directory hierarchy inside the ZIP (PRD §5.6) and
     // de-duplicate entry names so no selected file is silently overwritten.
     const usedNames = new Set<string>();
-    const entries = selected.map((f) => {
-      const folder = folderPathFor(this.db.folders, space.id, f.folderId);
-      return { file: f, folder, entryName: uniqueEntryName(folder, f.name, usedNames) };
-    });
+    const entries: { file: FileRecord; folder: string; entryName: string }[] = [];
+    for (const f of selected) {
+      const folder = await folderPathFor(this.db.folders, space.id, f.folderId);
+      entries.push({ file: f, folder, entryName: uniqueEntryName(folder, f.name, usedNames) });
+    }
 
     // Build manifest of selected files.
     const manifest = {
@@ -305,13 +385,15 @@ export class ArchivePlanService {
         getData: () => this.storage.getObject(f.objectKey),
       })),
     );
-    const counting = Readable.from(async function* (source) {
-      for await (const chunk of source) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-        bytes += buf.length;
-        yield buf;
-      }
-    }(zip));
+    const counting = Readable.from(
+      (async function* (source: Readable) {
+        for await (const chunk of source) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+          bytes += buf.length;
+          yield buf;
+        }
+      })(zip),
+    );
 
     const archiveId = newId();
     const objectKey = STORAGE_PATHS.archiveZip(space.ownerId, space.id, archiveId);
@@ -349,12 +431,18 @@ export class ArchivePlanService {
       createdAt: now(),
       verifiedAt: new Date().toISOString(),
     };
-    // Populate checksum on the archive (existing column).
-    this.db.archives.insert(archive);
-    this.db.archives.update(archiveId, { checksum: checksumHex, sizeBytes: stored.size, fileCount: selected.length, status: 'VERIFIED', verifiedAt: new Date().toISOString() });
+    await this.db.archives.insert(archive);
+    // Keep the checksum/size authoritative on the stored row.
+    await this.db.archives.update(archiveId, {
+      checksum: checksumHex,
+      sizeBytes: stored.size,
+      fileCount: selected.length,
+      status: 'VERIFIED',
+      verifiedAt: new Date().toISOString(),
+    });
 
     // Transition the space to ARCHIVED (only after verified persistence).
-    this.db.spaces.update(space.id, { status: 'ARCHIVED', updatedAt: new Date().toISOString() });
+    await this.db.spaces.update(space.id, { status: 'ARCHIVED', updatedAt: new Date().toISOString() });
 
     return archive;
   }

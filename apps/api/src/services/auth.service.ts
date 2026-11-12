@@ -24,9 +24,9 @@ export class AuthService {
   }
 
   async register(email: string, password: string, displayName: string): Promise<AuthResult> {
-    const existing = this.auth.findByEmail(email);
+    const existing = await this.auth.findByEmail(email);
     if (existing) throw new AppError('EMAIL_ALREADY_REGISTERED', 'That email is already registered');
-    const firstUser = this.auth.count() === 0;
+    const firstUser = (await this.auth.count()) === 0;
     const profile: Profile = {
       id: crypto.randomUUID(),
       email: email.toLowerCase(),
@@ -36,21 +36,21 @@ export class AuthService {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    this.auth.create(profile, hashPassword(password));
+    await this.auth.create(profile, hashPassword(password));
     return this.issueToken(profile);
   }
 
   async login(email: string, password: string): Promise<AuthResult> {
-    const account = this.auth.getCredentials(this.auth.findByEmail(email)?.id ?? '');
-    const profile = this.auth.findByEmail(email);
-    if (!account || !profile || !verifyPassword(password, account.passwordHash)) {
+    const profile = await this.auth.findByEmail(email);
+    const account = profile ? await this.auth.getCredentials(profile.id) : undefined;
+    if (!profile || !account || !verifyPassword(password, account.passwordHash)) {
       throw new AppError('INVALID_CREDENTIALS', 'Invalid email or password');
     }
     return this.issueToken(profile);
   }
 
   async me(userId: string): Promise<AuthUser> {
-    const profile = this.auth.findById(userId);
+    const profile = await this.auth.findById(userId);
     if (!profile) throw new AppError('UNAUTHENTICATED', 'User no longer exists');
     return this.toAuthUser(profile);
   }
@@ -59,7 +59,7 @@ export class AuthService {
     userId: string,
     patch: { displayName?: string; avatarUrl?: string | null },
   ): Promise<AuthUser> {
-    const profile = this.auth.update(userId, patch);
+    const profile = await this.auth.update(userId, patch);
     if (!profile) throw new AppError('NOT_FOUND', 'User not found');
     return this.toAuthUser(profile);
   }
