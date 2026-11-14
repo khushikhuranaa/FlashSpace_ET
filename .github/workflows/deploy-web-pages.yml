@@ -1,0 +1,77 @@
+name: Deploy web to GitHub Pages
+
+# Publishes apps/web to https://<owner>.github.io/<repo>/ — static hosting only.
+# The Express API still runs on Render; the web build points at it through the
+# VITE_API_URL repository variable, and the API must allow this origin in
+# WEB_ORIGIN (comma-separated list).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'packages/shared/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-web-pages.yml'
+  workflow_dispatch:
+
+# One Pages deployment at a time; a newer push supersedes a queued one but never
+# cancels a deployment that is already publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build --workspace @flashspace/shared
+
+      # Pages serves a project site from /<repo>/, so the bundle and its assets
+      # need that base path. Values come from repository variables
+      # (Settings → Secrets and variables → Actions → Variables); an unset
+      # variable renders as an empty string, which the app treats as "not
+      # configured" rather than crashing.
+      - name: Build web bundle for Pages
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          VITE_AUTH_MODE: ${{ vars.VITE_AUTH_MODE || 'supabase' }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        run: npm run build --workspace @flashspace/web
+
+      # Hash routing keeps every route on index.html, so this fallback only
+      # covers hand-typed paths such as /FlashSpace_ET/dashboard.
+      - name: Add SPA fallback
+        run: cp apps/web/dist/index.html apps/web/dist/404.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
