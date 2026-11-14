@@ -2,6 +2,10 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
+  // GitHub Pages serves a project site from /<repo>/, so the Pages workflow sets
+  // VITE_BASE=/<repo>/. Default '/' keeps local dev, Docker and root-hosted
+  // deployments (Render, custom domains) byte-for-byte unchanged.
+  base: process.env.VITE_BASE ?? '/',
   plugins: [react()],
   server: {
     proxy: {

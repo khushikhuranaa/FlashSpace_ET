@@ -74,31 +74,14 @@ services:
       - key: EMAIL_FROM
         sync: false
 
+  # The frontend is not hosted here: .github/workflows/deploy-web-pages.yml
+  # publishes the static Vite bundle to GitHub Pages. This API must allow that
+  # origin in WEB_ORIGIN (e.g. https://<owner>.github.io) or browser calls fail
+  # the CORS check.
+
   # Scheduler: Render cron calls the authenticated lifecycle endpoint. The
   # endpoint is idempotent per (date, space, phase), so a missed or duplicated
   # run is harmless. Replace the URL with the deployed API host.
-  # Static frontend. The Vite build is fully static; hash routing needs a single
-  # SPA rewrite so deep links and refreshes resolve to index.html.
-  - type: web
-    name: flashspace-web
-    runtime: static
-    plan: free
-    buildCommand: npm ci --no-audit --no-fund && npm run build --workspace @flashspace/shared && npm run build --workspace @flashspace/web
-    staticPublishPath: ./apps/web/dist
-    envVars:
-      - key: VITE_AUTH_MODE
-        value: supabase
-      - key: VITE_API_URL
-        sync: false
-      - key: VITE_SUPABASE_URL
-        sync: false
-      - key: VITE_SUPABASE_ANON_KEY
-        sync: false
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-
   - type: cron
     name: flashspace-lifecycle
     runtime: node

@@ -250,22 +250,42 @@ FlashSpace account**.
 
 ## Render blueprint (exact settings)
 
-`render.yaml` defines three services:
+`render.yaml` defines two services; the frontend is published to GitHub Pages
+instead of being hosted here.
 
 | Service | Type | Build | Start / publish | Health check |
 | --- | --- | --- | --- | --- |
 | `flashspace-api` | Web (Docker) | `apps/api/Dockerfile`, build context = repo root | image `CMD node apps/api/dist/server.js` | `/health` |
-| `flashspace-web` | Web (static) | `npm ci && npm run build -w @flashspace/shared && npm run build -w @flashspace/web` | publish `apps/web/dist`, rewrite `/* → /index.html` | — |
 | `flashspace-lifecycle` | Cron, `*/10 * * * *` | none | `node apps/api/scripts/run-lifecycle.mjs` | — |
 
-Environment: the production block above. The static service needs
-`VITE_API_URL` (API origin), `VITE_AUTH_MODE=supabase`, `VITE_SUPABASE_URL` and
-`VITE_SUPABASE_ANON_KEY`; never the service-role key.
+Environment: the production block above, with `WEB_ORIGIN` listing every browser
+origin, including the Pages one once the frontend is live.
 
 Deployment order: (1) Supabase project, migrations and buckets, (2) API service,
-(3) static frontend, (4) cron job. After the first API boot run
+(3) GitHub Pages frontend, (4) cron job. After the first API boot run
 `DATABASE_URL=... npm run db:status -w @flashspace/api` and expect
 `pending: []`, `drifted: []`. A restart logs `applied 0, already applied 10`.
+
+## Frontend on GitHub Pages
+
+`.github/workflows/deploy-web-pages.yml` builds `apps/web` and publishes it to
+`https://<owner>.github.io/<repo>/` on every push to `main` that touches the web
+app, `packages/shared` or the workflow itself.
+
+One-time setup:
+
+1. Repository **Settings → Pages → Source: GitHub Actions**.
+2. Repository **Settings → Secrets and variables → Actions → Variables**:
+   `VITE_API_URL` (the Render API origin), `VITE_AUTH_MODE=supabase`,
+   `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. The anon key is public by
+   design (it ships in the bundle); never put the service-role key here.
+3. On the API, add the Pages origin to `WEB_ORIGIN`, e.g.
+   `WEB_ORIGIN=https://app.example.com,https://<owner>.github.io`, then
+   redeploy — otherwise browser requests fail the CORS check.
+
+The workflow sets `VITE_BASE=/<repo>/` because a project site is served from a
+subpath. Hash routing keeps every in-app route on `index.html`, so no server
+rewrite is needed. Local dev, Docker and root-hosted builds still use `base: '/'`.
 
 ## First administrator (Supabase mode)
 
