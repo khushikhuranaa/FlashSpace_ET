@@ -256,7 +256,17 @@ export class ScanService {
   // ---- internals ---------------------------------------------------------
 
   private async hashFile(file: FileRecord): Promise<{ sha256: string | null; error: string | null }> {
-    if (file.sha256) return { sha256: file.sha256, error: null };
+    // If we already have a content hash, verify the object still exists before
+    // reusing it. A missing object means the stored file is gone, so the scan
+    // must report a failure rather than fabricate a result from a stale hash.
+    if (file.sha256) {
+      try {
+        await this.storage.headObject(file.objectKey);
+        return { sha256: file.sha256, error: null };
+      } catch {
+        return { sha256: null, error: 'Stored object no longer exists' };
+      }
+    }
     try {
       const stream = await this.storage.getObject(file.objectKey);
       const hash = createHash('sha256');

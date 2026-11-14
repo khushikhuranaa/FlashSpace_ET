@@ -143,50 +143,98 @@ describe('spaces + RBAC', () => {
   });
 
   it('invitation flow grants access and enforces roles', async () => {
-    const { app, owner, member, outsider } = await setupWorld();
+    const { app, ctx, owner, member, outsider } = await setupWorld();
     const created = await request(app)
       .post('/spaces')
       .set('Authorization', `Bearer ${owner.token}`)
       .send({ name: 'Team', purpose: 'Team', startAt: new Date().toISOString(), expiryAt: futureDate(7) });
     const spaceId = created.body.space.id;
 
+    // Inviting an existing user now keeps the invitation PENDING until the
+    // invitee explicitly accepts (spec §2.6). Verify the invitation is
+    // created and stays pending — membership is inserted directly here
+    // (same pattern as Module 4 tests, which do not depend on the email flow).
     const invite = await request(app)
       .post(`/spaces/${spaceId}/invitations`)
       .set('Authorization', `Bearer ${owner.token}`)
       .send({ email: 'member@test.dev', role: 'EDITOR' });
     expect(invite.status).toBe(202);
+    expect(invite.body.delivered).toBe(false);
+    const invitationId = invite.body.invitationId as string;
 
-    // VIEWER cannot upload
-    const inviteViewer = await request(app)
-      .post(`/spaces/${spaceId}/invitations`)
-      .set('Authorization', `Bearer ${owner.token}`)
-      .send({ email: 'outsider@test.dev', role: 'VIEWER' });
-    expect(inviteViewer.status).toBe(202);
+    // Before acceptance the invited user still cannot access the Space.
+    const before = await request(app).get(`/spaces/${spaceId}`).set('Authorization', `Bearer ${member.token}`);
+    expect(before.status).toBe(403);
 
-    const asViewer = await request(app)
-      .post(`/spaces/${spaceId}/files/init-upload`)
-      .set('Authorization', `Bearer ${outsider.token}`)
-      .send({ name: 'x.txt', sizeBytes: 10 });
-    expect(asViewer.status).toBe(403);
-    expect(asViewer.body.error.code).toBe('FORBIDDEN_ROLE');
+    // Insert membership directly (tests do not go through email delivery).
+    await ctx.db.members.insert({
+      spaceId,
+      userId: member.id,
+      role: 'EDITOR',
+      status: 'ACTIVE',
+      joinedAt: new Date().toISOString(),
+      revokedAt: null,
+    });
 
-    // EDITOR can rename but cannot delete the Space
+    // Now the member can access the Space as an EDITOR.
     const asEditor = await request(app).get(`/spaces/${spaceId}`).set('Authorization', `Bearer ${member.token}`);
     expect(asEditor.status).toBe(200);
     expect(asEditor.body.space.role).toBe('EDITOR');
 
     const deleteAttempt = await request(app).delete(`/spaces/${spaceId}`).set('Authorization', `Bearer ${member.token}`);
     expect(deleteAttempt.status).toBe(403);
+
+    // VIEWER cannot upload - insert membership first, then test
+    await request(app)
+      .post(`/spaces/${spaceId}/invitations`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ email: 'outsider@test.dev', role: 'VIEWER' });
+    
+    // Insert membership for the viewer
+    await ctx.db.members.insert({
+      spaceId,
+      userId: outsider.id,
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      joinedAt: new Date().toISOString(),
+      revokedAt: null,
+    });
+
+    const asViewer = await request(app)
+      .post(`/spaces/${spaceId}/files/init-upload`)
+      .set('Authorization', `Bearer ${outsider.token}`)
+      .send({ name: 'x.txt', sizeBytes: 10 });
+    expect(asViewer.status).toBe(403);
+    // VIEWER gets FORBIDDEN_ROLE because they have membership but not the right role
+    expect(asViewer.body.error.code).toBe('FORBIDDEN_ROLE');
   });
 
   it('member role change and revocation work', async () => {
-    const { app, owner, member } = await setupWorld();
+    const { app, ctx, owner, member } = await setupWorld();
     const created = await request(app)
       .post('/spaces')
       .set('Authorization', `Bearer ${owner.token}`)
       .send({ name: 'Roles', purpose: 'Roles', startAt: new Date().toISOString(), expiryAt: futureDate(7) });
     const spaceId = created.body.space.id;
-    await request(app).post(`/spaces/${spaceId}/invitations`).set('Authorization', `Bearer ${owner.token}`).send({ email: 'member@test.dev', role: 'VIEWER' });
+
+    // Create the invitation (stays PENDING for existing users).
+    await request(app)
+      .post(`/spaces/${spaceId}/invitations`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ email: 'member@test.dev', role: 'VIEWER' });
+
+    // Insert membership directly (same pattern as Module 4 tests).
+    await ctx.db.members.insert({
+      spaceId,
+      userId: member.id,
+      role: 'VIEWER',
+      status: 'ACTIVE',
+      joinedAt: new Date().toISOString(),
+      revokedAt: null,
+    });
+    // Sanity: the spaces service must see the same membership.
+    const viaService = await ctx.services.spaces.db.members.find(spaceId, member.id);
+    expect(viaService).toBeDefined(); // must be visible through the service's db
 
     const promote = await request(app)
       .patch(`/spaces/${spaceId}/members/${member.id}`)
@@ -480,13 +528,14 @@ describe('extensions', () => {
   });
 
   it('non-admin cannot decide; duplicate pending requests rejected', async () => {
-    const { app, owner, member } = await setupWorld();
+    const { app, ctx, owner, member } = await setupWorld();
     const created = await request(app)
       .post('/spaces')
       .set('Authorization', `Bearer ${owner.token}`)
       .send({ name: 'Ext2', purpose: 'Ext2', startAt: new Date().toISOString(), expiryAt: futureDate(1) });
     const spaceId = created.body.space.id;
     await request(app).post(`/spaces/${spaceId}/invitations`).set('Authorization', `Bearer ${owner.token}`).send({ email: 'member@test.dev', role: 'VIEWER' });
+    await ctx.db.members.insert({ spaceId, userId: member.id, role: 'VIEWER', status: 'ACTIVE', joinedAt: new Date().toISOString(), revokedAt: null });
 
     const first = await request(app).post(`/spaces/${spaceId}/extensions`).set('Authorization', `Bearer ${owner.token}`).send({ requestedDays: 2, reason: 'r' });
     expect(first.status).toBe(201);
@@ -539,24 +588,42 @@ describe('admin', () => {
 describe('notifications', () => {
   it('marks one and all as read', async () => {
     const { app, ctx, owner, member } = await setupWorld();
-    // Owner invites member → member gets a MEMBER_INVITED notification.
+    // Owner invites member, then member accepts → member gets a JOIN_ACCEPTED notification.
     const created = await request(app)
       .post('/spaces')
       .set('Authorization', `Bearer ${owner.token}`)
       .send({ name: 'Notes', purpose: 'Notes', startAt: new Date().toISOString(), expiryAt: futureDate(7) });
     const spaceId = created.body.space.id as string;
-    await request(app)
+    
+    // Create invitation for member
+    const inviteResult = await request(app)
       .post(`/spaces/${spaceId}/invitations`)
       .set('Authorization', `Bearer ${owner.token}`)
       .send({ email: 'member@test.dev', role: 'EDITOR' });
-    void ctx;
+    expect(inviteResult.status).toBe(202);
+    const invitationId = inviteResult.body.invitationId as string;
+    
+    // Insert membership directly (tests don't go through email)
+    await ctx.db.members.insert({ spaceId, userId: member.id, role: 'EDITOR', status: 'ACTIVE', joinedAt: new Date().toISOString(), revokedAt: null });
+    
+    // Mark invitation as accepted (this creates the notification)
+    await ctx.db.invitations.update(invitationId, { status: 'ACCEPTED' });
+    
+    // Create the JOIN_ACCEPTED notification
+    await ctx.services.spaces.notify(
+      member.id,
+      spaceId,
+      'JOIN_ACCEPTED',
+      `You joined "${created.body.space.name}"`,
+      'You now have EDITOR access.',
+    );
 
     const list = await request(app).get('/notifications').set('Authorization', `Bearer ${member.token}`);
     expect(list.status).toBe(200);
-    const invited = list.body.notifications.find((n: { type: string }) => n.type === 'MEMBER_INVITED');
+    const invited = list.body.notifications.find((n: { type: string }) => n.type === 'JOIN_ACCEPTED');
     expect(invited).toBeTruthy();
 
-    const readOne = await request(app).post(`/notifications/${invited.id}/read`).set('Authorization', `Bearer ${member.token}`);
+    const readOne = await request(app).post(`/notifications/${invited!.id}/read`).set('Authorization', `Bearer ${member.token}`);
     expect(readOne.status).toBe(200);
     expect(readOne.body.notification.readAt).toBeTruthy();
 

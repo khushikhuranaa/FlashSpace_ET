@@ -20,8 +20,9 @@ npm run dev          # API on :4000, web on :5173 (proxies /api)
 ```
 
 Open **http://localhost:5173**. The first account you register becomes an
-**admin** (bootstrap rule). Everything runs on in-memory repositories and a
-local filesystem storage adapter — no database or object storage required.
+**admin** (bootstrap rule: register that account before sharing the URL). By
+default the API stores data in `apps/api/data/flashspace.db` (SQLite) and files
+on the local filesystem — no external database or object store required.
 
 ### Scripted demo
 
@@ -77,14 +78,17 @@ DRAFT ──start──▶ ACTIVE ──expiry−24h──▶ WARNING ──expi
 | Database | `REPO_MODE=memory` | `REPO_MODE=postgres` (`DATABASE_URL`, `docker compose up db`, `npm run db:migrate`) |
 | Objects | `STORAGE_MODE=local` | `STORAGE_MODE=supabase` (Supabase Storage, service key server-side only) |
 
-Copy `.env.example` → `.env` and fill in the pieces you enable. All storage and
-persistence code sits behind interfaces (`StorageAdapter`, data layer), so the
-domain logic does not change.
+Copy `.env.example` into the file each block names — `apps/api/.env` for server
+secrets and `apps/web/.env` for publishable `VITE_` values — and fill in only the
+pieces you enable. The API loads `apps/api/.env`/`.env.local` on boot without
+ever overriding variables the platform already set. All storage and persistence
+code sits behind interfaces (`StorageAdapter`, data layer), so the domain logic
+does not change.
 
 ## Testing & CI
 
 ```bash
-npm test             # 27 integration tests through the real Express app
+npm test             # API suite through the real Express app + web component tests
 npm run typecheck    # all workspaces
 ```
 

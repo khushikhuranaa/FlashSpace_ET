@@ -133,9 +133,14 @@ create table if not exists extension_requests (
   requester_id text not null references profiles (id) on delete cascade,
   requested_days integer not null check (requested_days > 0),
   reason text not null,
-  status text not null default 'PENDING' check (status in ('PENDING', 'APPROVED', 'REJECTED')),
+  status text not null default 'PENDING' check (status in ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')),
   decided_by text references profiles (id) on delete set null,
   decided_at timestamptz,
+  rejection_reason text,
+  admin_note text,
+  previous_expiry_at timestamptz,
+  new_expiry_at timestamptz,
+  approval_method text check (approval_method in ('MANUAL', 'AUTOMATIC')),
   created_at timestamptz not null
 );
 create index if not exists extension_requests_space_idx on extension_requests (space_id, status);

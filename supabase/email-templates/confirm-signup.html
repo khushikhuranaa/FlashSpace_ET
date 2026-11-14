@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Verify your FlashSpace email</title>
+  </head>
+  <!--
+    Supabase → Authentication → Email Templates → "Confirm signup"
+    Subject: Verify your FlashSpace email address
+    Variables: {{ .ConfirmationURL }} {{ .Email }} {{ .SiteURL }}
+  -->
+  <body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px 8px 32px;">
+                <span style="font-size:18px;font-weight:700;letter-spacing:-0.02em;color:#0f172a;">FlashSpace</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px 32px 0 32px;">
+                <h1 style="margin:0;font-size:22px;line-height:1.3;color:#0f172a;">Verify your email address</h1>
+                <p style="margin:12px 0 0 0;font-size:14px;line-height:1.6;color:#475569;">
+                  Confirm <strong style="color:#0f172a;">{{ .Email }}</strong> to activate your FlashSpace account.
+                  Spaces you create are temporary by design and close on schedule — verifying your address keeps you in
+                  control of their archives.
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:24px 32px 8px 32px;">
+                <a href="{{ .ConfirmationURL }}"
+                   style="display:inline-block;background:#4338ca;color:#ffffff;text-decoration:none;font-size:14px;font-weight:600;padding:12px 22px;border-radius:9px;">
+                  Verify email address
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px 32px 24px 32px;">
+                <p style="margin:0;font-size:12px;line-height:1.6;color:#64748b;">
+                  This link expires shortly and can be used once. If you did not create a FlashSpace account, ignore this
+                  email — nothing will be activated.
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px 28px 32px;border-top:1px solid #e2e8f0;">
+                <p style="margin:0;font-size:11px;line-height:1.6;color:#94a3b8;">
+                  Button not working? Paste this link into your browser:<br />
+                  <span style="color:#475569;word-break:break-all;">{{ .ConfirmationURL }}</span>
+                </p>
+              </td>
+            </tr>
+          </table>
+          <p style="max-width:560px;margin:16px auto 0 auto;font-size:11px;color:#94a3b8;text-align:center;">
+            FlashSpace — temporary workspaces with a guaranteed end.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

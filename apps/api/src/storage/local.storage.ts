@@ -38,9 +38,10 @@ export class LocalStorageAdapter implements StorageAdapter {
     key: string,
     expiresInSeconds: number,
     downloadName?: string,
+    inlineMime?: string,
   ): Promise<SignedUrl> {
     const { token, expiresAt } = signStorageToken(
-      { method: 'GET', key, expiresInSeconds, filename: downloadName },
+      { method: 'GET', key, expiresInSeconds, filename: downloadName, mime: inlineMime },
       this.secret,
     );
     return { url: `${this.getBaseUrl()}/storage-download?token=${encodeURIComponent(token)}`, expiresAt };

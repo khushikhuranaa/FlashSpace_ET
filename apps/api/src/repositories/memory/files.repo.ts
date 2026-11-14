@@ -24,7 +24,7 @@ export class MemoryFilesRepo implements FilesRepo {
   }
 
   listActiveForSpace(spaceId: string): FileRecord[] {
-    return this.listForSpace(spaceId).filter((f) => f.status !== 'DELETED');
+    return this.listForSpace(spaceId).filter((f) => f.status === 'ACTIVE');
   }
 
   findByObjectKey(objectKey: string): FileRecord | undefined {

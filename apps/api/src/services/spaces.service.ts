@@ -55,8 +55,34 @@ export class SpacesService {
       }
     }
     const sorted = spaces.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return this.enrich(sorted, userId);
+  }
+
+  /**
+   * Adds the per-viewer fields (star, owner name, last access) in three batched
+   * lookups instead of one query per Space.
+   */
+  private async enrich(spaces: Space[], viewerId: string): Promise<SpaceDetail[]> {
+    const favorites = new Set((await this.db.favoriteSpaces.listForUser(viewerId)).map((f) => f.spaceId));
+    const access = new Map(
+      (await this.db.access.listForUser(viewerId, 500)).map((a) => [a.spaceId, a.lastAccessedAt]),
+    );
+    const owners = new Map<string, string>();
+    for (const space of spaces) {
+      if (owners.has(space.ownerId)) continue;
+      const profile = await this.db.auth.findById(space.ownerId);
+      owners.set(space.ownerId, profile?.displayName ?? 'Unknown owner');
+    }
     const details: SpaceDetail[] = [];
-    for (const s of sorted) details.push(await this.toDetail(s, userId));
+    for (const space of spaces) {
+      details.push(
+        await this.toDetail(space, viewerId, {
+          favorite: favorites.has(space.id),
+          ownerName: owners.get(space.ownerId) ?? null,
+          lastAccessedAt: access.get(space.id) ?? null,
+        }),
+      );
+    }
     return details;
   }
 
@@ -67,7 +93,17 @@ export class SpacesService {
     if (!role && (await this.db.auth.findById(userId))?.role !== 'ADMIN') {
       throw new AppError('SPACE_ACCESS_DENIED', 'You do not have access to this Space');
     }
-    return this.toDetail(space, userId);
+    // Meaningful access event: the user actually opened this Space. Dashboard
+    // "recently accessed" is built from these rows, never from renders.
+    const accessedAt = new Date().toISOString();
+    await this.db.access.touch(spaceId, userId, accessedAt);
+    const favorite = (await this.db.favoriteSpaces.listForUser(userId)).some((f) => f.spaceId === spaceId);
+    const owner = await this.db.auth.findById(space.ownerId);
+    return this.toDetail(space, userId, {
+      favorite,
+      ownerName: owner?.displayName ?? null,
+      lastAccessedAt: accessedAt,
+    });
   }
 
   async roleOf(spaceId: string, userId: string): Promise<MemberRole | null> {
@@ -112,8 +148,30 @@ export class SpacesService {
 
   async create(
     user: AuthUser,
-    input: { name: string; purpose: string; description?: string; startAt: string; expiryAt: string },
+    input: {
+      name: string;
+      purpose: string;
+      description?: string;
+      startAt: string;
+      expiryAt: string;
+      /** Root folders to create straight away (Space templates). */
+      folders?: string[];
+    },
   ): Promise<Space> {
+    const name = input.name.trim();
+    const purpose = input.purpose.trim();
+    const description = (input.description ?? '').trim();
+
+    if (name.length < 3 || name.length > 120) {
+      throw new AppError('VALIDATION_ERROR', 'Space name must be between 3 and 120 characters');
+    }
+    if (!purpose || purpose.length > 120) {
+      throw new AppError('VALIDATION_ERROR', 'Purpose must be between 1 and 120 characters');
+    }
+    if (description.length > 2000) {
+      throw new AppError('VALIDATION_ERROR', 'Description cannot exceed 2000 characters');
+    }
+
     const activeCount = (await this.listForUser(user.id)).filter(
       (s) => s.status === 'DRAFT' || s.status === 'ACTIVE' || s.status === 'WARNING',
     ).length;
@@ -129,32 +187,44 @@ export class SpacesService {
     const space: Space = {
       id: newId(),
       ownerId: user.id,
-      name: input.name,
-      purpose: input.purpose,
-      description: input.description ?? '',
+      name,
+      purpose,
+      description,
       startAt: start.toISOString(),
       expiryAt: expiry.toISOString(),
       status: start.getTime() <= Date.now() ? 'ACTIVE' : 'DRAFT',
       warningSentAt: null,
       archivedManually: false,
+      invitationsEnabled: true,
+      defaultInviteRole: 'VIEWER',
       createdAt: now,
       updatedAt: now,
     };
     await this.db.spaces.insert(space);
-    await this.db.members.insert({
-      spaceId: space.id,
-      userId: user.id,
-      role: 'OWNER',
-      status: 'ACTIVE',
-      joinedAt: now,
-      revokedAt: null,
-    });
+
+    // The Space row and its OWNER membership must never diverge. If the
+    // membership write fails the Space is retired on the spot instead of being
+    // left behind ownerless (a Space nobody can administer).
+    try {
+      await this.db.members.insert({
+        spaceId: space.id,
+        userId: user.id,
+        role: 'OWNER',
+        status: 'ACTIVE',
+        joinedAt: now,
+        revokedAt: null,
+      });
+    } catch (err) {
+      await this.db.spaces.update(space.id, { status: 'DELETED' });
+      throw err;
+    }
+
     await this.db.activity.append({
       userId: user.id,
       spaceId: space.id,
       fileId: null,
       action: ACTIVITY_ACTIONS.SPACE_CREATED,
-      metadata: { name: space.name },
+      metadata: { name: space.name, purpose: space.purpose },
     });
     await this.notify(
       user.id,
@@ -163,6 +233,12 @@ export class SpacesService {
       `Space "${space.name}" created`,
       `Runs from ${new Date(space.startAt).toLocaleString()} to ${new Date(space.expiryAt).toLocaleString()}.`,
     );
+
+    // Template folders go through the normal folder path so validation, naming
+    // and audit entries are identical to a hand-created folder.
+    for (const folderName of input.folders ?? []) {
+      await this.createFolder(user, space.id, { name: folderName });
+    }
     return space;
   }
 
@@ -218,6 +294,7 @@ export class SpacesService {
     const target = await this.db.members.find(spaceId, targetUserId);
     if (!target || target.status === 'REVOKED') throw new AppError('MEMBER_NOT_FOUND', 'Member not found');
     if (role === 'OWNER') throw new AppError('FORBIDDEN_ROLE', 'There can be only one OWNER');
+    const before = await this.db.members.find(spaceId, targetUserId);
     const next = await this.db.members.update(spaceId, targetUserId, { role });
     const space = await this.db.spaces.findById(spaceId);
     await this.notify(
@@ -232,7 +309,10 @@ export class SpacesService {
       spaceId,
       fileId: null,
       action: ACTIVITY_ACTIONS.MEMBER_ROLE_CHANGED,
-      metadata: { targetUserId, role },
+      category: 'MEMBERSHIP',
+      resourceType: 'user',
+      resourceId: targetUserId,
+      metadata: { targetUserId, role, previousRole: before?.role ?? null, newRole: role },
     });
     return next!;
   }
@@ -343,12 +423,19 @@ export class SpacesService {
     this.db.notificationBus.publish(userId, notification);
   }
 
-  private async toDetail(space: Space, viewerId: string): Promise<SpaceDetail> {
+  private async toDetail(
+    space: Space,
+    viewerId: string,
+    meta: { favorite: boolean; ownerName: string | null; lastAccessedAt: string | null },
+  ): Promise<SpaceDetail> {
     return {
       ...space,
       role: await this.roleOf(space.id, viewerId),
       members: await this.memberViews(space.id),
       storageUsedBytes: await this.db.files.usedBytesForSpace(space.id),
+      favorite: meta.favorite,
+      ownerName: meta.ownerName,
+      lastAccessedAt: meta.lastAccessedAt,
     };
   }
 

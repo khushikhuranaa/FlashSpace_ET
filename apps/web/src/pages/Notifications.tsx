@@ -8,11 +8,11 @@ import { timeAgo } from '../lib/format';
 const META: Record<string, { icon: IconName; tint: string }> = {
   SPACE_CREATED: { icon: 'plus', tint: 'bg-flash-50 text-flash-700' },
   SPACE_WARNING: { icon: 'clock', tint: 'bg-amber-50 text-amber-600' },
-  SPACE_ARCHIVED: { icon: 'archive', tint: 'bg-purple-50 text-purple-600' },
+  SPACE_ARCHIVED: { icon: 'archive', tint: 'bg-flash-50 text-flash-700' },
   SPACE_DELETED: { icon: 'trash', tint: 'bg-red-50 text-red-600' },
   MEMBER_INVITED: { icon: 'mail', tint: 'bg-flash-50 text-flash-700' },
   MEMBER_ROLE_CHANGED: { icon: 'users', tint: 'bg-slate-100 text-slate-600' },
-  EXTENSION_DECIDED: { icon: 'calendar', tint: 'bg-blue-50 text-blue-600' },
+  EXTENSION_DECIDED: { icon: 'calendar', tint: 'bg-info-50 text-info-700' },
   ARCHIVE_FAILED: { icon: 'alert-circle', tint: 'bg-red-50 text-red-600' },
   JOIN_REQUEST: { icon: 'user-plus', tint: 'bg-emerald-50 text-emerald-600' },
   JOIN_ACCEPTED: { icon: 'check-circle', tint: 'bg-emerald-50 text-emerald-600' },
@@ -21,7 +21,7 @@ const META: Record<string, { icon: IconName; tint: string }> = {
   SCAN_FAILED: { icon: 'alert', tint: 'bg-red-50 text-red-600' },
   PLAN_CREATED: { icon: 'list', tint: 'bg-slate-100 text-slate-600' },
   PLAN_CANCELLED: { icon: 'x', tint: 'bg-slate-100 text-slate-600' },
-  ARCHIVE_PLAN_CONFIRMED: { icon: 'archive', tint: 'bg-purple-50 text-purple-600' },
+  ARCHIVE_PLAN_CONFIRMED: { icon: 'archive', tint: 'bg-flash-50 text-flash-700' },
   ARCHIVE_PLAN_FAILED: { icon: 'alert', tint: 'bg-red-50 text-red-600' },
   DUPLICATE_FILES_REMOVED: { icon: 'trash', tint: 'bg-slate-100 text-slate-600' },
   REMINDER_SENT: { icon: 'bell', tint: 'bg-amber-50 text-amber-600' },
@@ -70,6 +70,22 @@ export default function Notifications({ navigate }: { navigate: (to: string) => 
     }
   };
 
+  const decideInvitation = async (notification: Notification, action: 'accept' | 'decline') => {
+    if (!notification.spaceId) return;
+    setBusyId(notification.id);
+    try {
+      await api.decideSpaceInvitation(notification.spaceId, action === 'accept' ? 'ACCEPT' : 'DECLINE');
+      await api.markRead(notification.id).catch(() => undefined);
+      await load();
+      toast(action === 'accept' ? 'Invitation accepted' : 'Invitation declined', 'success');
+      if (action === 'accept') navigate(`/spaces/${notification.spaceId}`);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Could not update the invitation', 'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const decide = async (notification: Notification, decision: 'ACCEPT' | 'DECLINE') => {
     if (!notification.joinRequestId) return;
     setBusyId(notification.id);
@@ -85,11 +101,12 @@ export default function Notifications({ navigate }: { navigate: (to: string) => 
     }
   };
 
+
   return (
     <div className="space-y-5">
       <section className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="font-display text-[22px] font-bold tracking-tight text-primary">Notifications</h1>
+          <h1 className="page-title">Notifications</h1>
           <p className="mt-0.5 text-[13px] text-muted">
             {items.length === 0
               ? 'Activity from your workspaces.'
@@ -153,7 +170,31 @@ export default function Notifications({ navigate }: { navigate: (to: string) => 
                         Open Space
                       </button>
                     )}
-                    {actionable && (
+                    {notification.type === 'MEMBER_INVITED' && notification.spaceId && (
+                      <>
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void decideInvitation(notification, 'accept');
+                          }}
+                          disabled={busyId === notification.id}
+                          className="rounded-lg bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+                        >
+                          Accept
+                        </button>
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void decideInvitation(notification, 'decline');
+                          }}
+                          disabled={busyId === notification.id}
+                          className="rounded-lg bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+                        >
+                          Decline
+                        </button>
+                      </>
+                    )}
+                    {actionable && notification.type !== 'MEMBER_INVITED' && (
                       <>
                         <button
                           onClick={(event) => {

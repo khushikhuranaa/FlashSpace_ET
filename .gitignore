@@ -16,5 +16,20 @@ data/
 tmp/
 .vitest/
 
+# incremental TypeScript build info (machine-specific)
+*.tsbuildinfo
+
+# generated UI screenshots from local design/QA passes (9 MB, not source)
+screenshots/
+apps/web/final-frontend-screenshot*.png
+
+# one-off local debugging scripts, not project source
+/_*.mjs
+/phase0-boot-test.mjs
+
 # Freebuff workspace metadata (machine-specific local paths, not project source)
 .freebuff/
+
+# Safety backups taken before refactors: database dumps and a repo bundle that
+# must never be committed.
+.backups/

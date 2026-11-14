@@ -135,6 +135,17 @@ export class MemoryArchiveJobsRepo {
   findByPlanId(planId: string): ArchiveJobRow | undefined {
     return [...this.rows.values()].find((r) => r.planId === planId);
   }
+  findByEntity(entityType: string, entityId: string): ArchiveJobRow | undefined {
+    return [...this.rows.values()]
+      .filter((r) =>
+        entityType === 'plan'
+          ? r.planId === entityId
+          : entityType === 'space'
+            ? r.spaceId === entityId
+            : r.id === entityId,
+      )
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+  }
   findByIdempotencyKey(key: string): ArchiveJobRow | undefined {
     return [...this.rows.values()].find((r) => r.idempotencyKey === key);
   }

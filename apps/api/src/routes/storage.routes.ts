@@ -23,16 +23,48 @@ export function storageRoutes(env: Env, storage: StorageAdapter): Router {
       res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: 'Invalid or expired token' } });
       return;
     }
+
+    // Module 14: bound the bytes accepted by an upload. Without this a holder
+    // of a valid token (or a client that under-declared its size) could stream
+    // unbounded data into API memory before confirmation ever re-checks it.
+    const maxBytes = env.fileMaxBytes + 1024;
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      res.status(413).json({
+        error: { code: 'PAYLOAD_TOO_LARGE', message: 'Upload exceeds the configured file size limit' },
+      });
+      req.destroy();
+      return;
+    }
+
+    let received = 0;
+    let exceeded = false;
     try {
       const chunks: Buffer[] = [];
       await pipeline(req, async function* (source) {
         for await (const chunk of source) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+          received += buf.length;
+          if (received > maxBytes) {
+            exceeded = true;
+            throw new Error('PAYLOAD_TOO_LARGE');
+          }
+          chunks.push(buf);
         }
       });
       await storage.putObject(payload.key, Buffer.concat(chunks));
       res.status(200).json({ ok: true });
-    } catch {
+    } catch (err) {
+      if (exceeded || (err as Error)?.message === 'PAYLOAD_TOO_LARGE') {
+        // Remove any partially written object so an oversized upload cannot
+        // occupy storage it was never granted.
+        await storage.deleteObject(payload.key).catch(() => undefined);
+        res.status(413).json({
+          error: { code: 'PAYLOAD_TOO_LARGE', message: 'Upload exceeds the configured file size limit' },
+        });
+        req.destroy();
+        return;
+      }
       res.status(500).json({ error: { code: 'STORAGE_ERROR', message: 'Upload failed' } });
     }
   });
@@ -52,8 +84,13 @@ export function storageRoutes(env: Env, storage: StorageAdapter): Router {
       const stream = await storage.getObject(payload.key);
       if (payload.filename) {
         res.setHeader('Content-Disposition', `attachment; filename="${payload.filename.replace(/"/g, '')}"`);
+      } else if (payload.mime) {
+        // Preview token: the browser may render it, but never as a document
+        // with script execution (only image/pdf/text types are issued one).
+        res.setHeader('Content-Disposition', 'inline');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
       }
-      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Type', payload.mime ?? 'application/octet-stream');
       await pipeline(stream, res);
     } catch {
       res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Object not found' } });

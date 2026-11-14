@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FlashSpace security notice</title>
+  </head>
+  <!--
+    Supabase → Authentication → Email Templates → "Security notification"
+    Subject: Security notice for your FlashSpace account
+    Variables: {{ .Email }}
+    Use this template for provider-driven security notices (password changed,
+    email changed, sign-in from a new device, account locked).
+  -->
+  <body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px 8px 32px;">
+                <span style="font-size:18px;font-weight:700;letter-spacing:-0.02em;color:#0f172a;">FlashSpace</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px 32px 0 32px;">
+                <h1 style="margin:0;font-size:22px;line-height:1.3;color:#0f172a;">Security notice</h1>
+                <p style="margin:12px 0 0 0;font-size:14px;line-height:1.6;color:#475569;">
+                  A security-relevant change was made to the FlashSpace account for
+                  <strong style="color:#0f172a;">{{ .Email }}</strong>.
+                </p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 32px 0 32px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;">
+                  <tr>
+                    <td style="padding:12px 16px;font-size:13px;line-height:1.6;color:#92400e;">
+                      If this was you, no action is needed. If you do not recognise it, change your password immediately
+                      and review the account activity in Settings.
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 32px 26px 32px;">
+                <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.8;color:#475569;">
+                  <li>Password changes revoke other sessions on next refresh.</li>
+                  <li>Email changes only apply after the new address confirms.</li>
+                  <li>Account deletion revokes every session immediately.</li>
+                </ul>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px 28px 32px;border-top:1px solid #e2e8f0;">
+                <p style="margin:0;font-size:11px;line-height:1.6;color:#94a3b8;">
+                  FlashSpace will never ask you to send a password, token or recovery code by email.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

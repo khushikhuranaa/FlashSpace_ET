@@ -77,12 +77,84 @@ export const extensionRequestSchema = z.object({
   requestedDays: z.number().int().min(1).max(365),
   reason: z.string().trim().min(1, 'A reason is required').max(1000),
 });
-
 export const extensionDecisionSchema = z.object({
   decision: z.enum(['APPROVED', 'REJECTED']),
+  /** Free-text reason recorded when the request is rejected. */
+  rejectionReason: z.string().trim().max(1000).optional(),
+  /** Optional admin note visible only to admins. */
+  adminNote: z.string().trim().max(1000).optional(),
 });
+export const cancelExtensionSchema = z.object({});
+
 
 export const markNotificationReadSchema = z.object({ read: z.boolean().default(true) });
+
+// ---- Module 11: admin control panel ----
+
+/** Global role change. Space roles are deliberately not part of this payload. */
+export const adminRoleChangeSchema = z.object({
+  role: z.enum(['USER', 'ADMIN']),
+  /** Required confirmation for sensitive changes; the API enforces it too. */
+  confirm: z.literal(true),
+});
+
+export const adminUserQuerySchema = z.object({
+  q: z.string().trim().max(200).optional(),
+  role: z.enum(['USER', 'ADMIN']).optional(),
+  status: z.enum(['ACTIVE', 'SUSPENDED']).optional(),
+  sort: z.enum(['created-asc', 'created-desc', 'name-asc', 'name-desc', 'activity-desc']).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const adminSuspendSchema = z.object({
+  reason: z.string().trim().min(5, 'A reason of at least 5 characters is required').max(1000),
+  confirm: z.literal(true),
+});
+
+export const adminAuditQuerySchema = z.object({
+  outlet: z.enum(['SECURITY', 'ADMIN', 'ALL']).optional(),
+  action: z.string().trim().max(80).optional(),
+  adminId: z.string().trim().max(80).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export type AdminRoleChangeInput = z.infer<typeof adminRoleChangeSchema>;
+
+/** Server-side filters for activity reads and CSV exports (Module 12). */
+export const activityQuerySchema = z.object({
+  q: z.string().trim().max(120).optional(),
+  action: z.string().trim().max(80).optional(),
+  category: z
+    .enum([
+      'SPACE',
+      'FILE',
+      'FOLDER',
+      'MEMBERSHIP',
+      'INVITATION',
+      'EXTENSION',
+      'ARCHIVE',
+      'CLEANUP',
+      'STORAGE',
+      'ADMIN',
+      'SECURITY',
+      'OTHER',
+    ])
+    .optional(),
+  actorType: z.enum(['USER', 'ADMIN', 'SYSTEM']).optional(),
+  outcome: z.enum(['SUCCESS', 'FAILURE']).optional(),
+  resourceType: z.string().trim().max(40).optional(),
+  resourceId: z.string().trim().max(80).optional(),
+  actorId: z.string().trim().max(80).optional(),
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  sort: z.enum(['newest', 'oldest']).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export type ActivityQueryInput = z.infer<typeof activityQuerySchema>;
 
 export const listSpacesQuerySchema = z.object({
   status: z.string().trim().max(40).optional(),

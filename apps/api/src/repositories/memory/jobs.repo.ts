@@ -1,5 +1,9 @@
+import { activityCategoryFor } from '@flashspace/shared';
 import type {
+  ActivityInput,
   ActivityLog,
+  ActivityPage,
+  ActivityQuery,
   CleanupRun,
   LifecycleJob,
   Notification,
@@ -89,6 +93,12 @@ export class MemoryCleanupRunsRepo implements CleanupRunsRepo {
     return [...this.runs.values()].filter((r) => r.spaceId === spaceId);
   }
 
+  listAll(limit = 100): CleanupRun[] {
+    return [...this.runs.values()]
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, limit);
+  }
+
   update(id: string, patch: Partial<CleanupRun>): CleanupRun | undefined {
     const current = this.runs.get(id);
     if (!current) return undefined;
@@ -102,14 +112,36 @@ export class MemoryActivityRepo implements ActivityRepo {
   private seq = 0;
   private readonly logs: ActivityLog[] = [];
 
-  append(log: Omit<ActivityLog, 'id' | 'createdAt'>): ActivityLog {
+  append(input: ActivityInput): ActivityLog {
+    if (input.eventKey) {
+      const existing = this.logs.find((l) => l.eventKey === input.eventKey);
+      if (existing) return existing;
+    }
     const entry: ActivityLog = {
-      ...log,
       id: ++this.seq,
+      userId: input.userId ?? null,
+      spaceId: input.spaceId ?? null,
+      fileId: input.fileId ?? null,
+      action: input.action,
+      metadata: input.metadata ?? {},
       createdAt: new Date().toISOString(),
+      actorType: input.actorType ?? (input.userId ? 'USER' : 'SYSTEM'),
+      outcome: input.outcome ?? 'SUCCESS',
+      category: input.category ?? activityCategoryFor(input.action),
+      // Infer a safe resource reference from the ids a caller already passed.
+      resourceType:
+        input.resourceType ?? (input.fileId ? 'file' : input.spaceId ? 'space' : null),
+      resourceId: input.resourceId ?? input.fileId ?? input.spaceId ?? null,
+      reason: input.reason ?? null,
+      correlationId: input.correlationId ?? null,
+      eventKey: input.eventKey ?? null,
     };
     this.logs.push(entry);
     return entry;
+  }
+
+  findById(id: number): ActivityLog | undefined {
+    return this.logs.find((l) => l.id === id);
   }
 
   listForSpace(spaceId: string, limit = 100): ActivityLog[] {
@@ -119,8 +151,47 @@ export class MemoryActivityRepo implements ActivityRepo {
       .slice(0, limit);
   }
 
+  listForUser(userId: string, limit = 100): ActivityLog[] {
+    return this.logs
+      .filter((l) => l.userId === userId)
+      .sort((a, b) => b.id - a.id)
+      .slice(0, limit);
+  }
+
   listAll(limit = 200): ActivityLog[] {
     return [...this.logs].sort((a, b) => b.id - a.id).slice(0, limit);
+  }
+
+  query(q: ActivityQuery): ActivityPage {
+    const limit = Math.min(Math.max(q.limit ?? 25, 1), 200);
+    const offset = Math.max(q.offset ?? 0, 0);
+    const spaceScope = q.spaceIds ? new Set(q.spaceIds) : null;
+    const actorScope = q.userIds ? new Set(q.userIds) : null;
+    const from = q.from ? new Date(q.from).getTime() : null;
+    const to = q.to ? new Date(q.to).getTime() : null;
+
+    const matches = this.logs.filter((l) => {
+      if (spaceScope) {
+        if (q.spaceId) {
+          if (l.spaceId !== q.spaceId) return false;
+        } else if (!l.spaceId || !spaceScope.has(l.spaceId)) return false;
+      } else if (q.spaceId && l.spaceId !== q.spaceId) return false;
+      if (q.userId && l.userId !== q.userId) return false;
+      if (actorScope && (!l.userId || !actorScope.has(l.userId))) return false;
+      if (q.actorType && l.actorType !== q.actorType) return false;
+      if (q.category && l.category !== q.category) return false;
+      if (q.action && l.action !== q.action) return false;
+      if (q.outcome && l.outcome !== q.outcome) return false;
+      if (q.resourceType && l.resourceType !== q.resourceType) return false;
+      if (q.resourceId && l.resourceId !== q.resourceId) return false;
+      const at = new Date(l.createdAt).getTime();
+      if (from !== null && at < from) return false;
+      if (to !== null && at > to) return false;
+      return true;
+    });
+
+    matches.sort((a, b) => (q.sort === 'oldest' ? a.id - b.id : b.id - a.id));
+    return { entries: matches.slice(offset, offset + limit), total: matches.length, limit, offset };
   }
 }
 

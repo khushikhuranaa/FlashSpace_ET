@@ -34,9 +34,29 @@ const PATHS = {
     </>
   ),
   plus: <path d="M12 5v14M5 12h14" />,
+  star: <path d="m12 3 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3-5.8 3 1.1-6.5L2.6 9.8l6.5-.9z" />,
+  'star-filled': (
+    <path
+      d="m12 3 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3-5.8 3 1.1-6.5L2.6 9.8l6.5-.9z"
+      fill="currentColor"
+    />
+  ),
   'arrow-left': <path d="M19 12H5M12 19l-7-7 7-7" />,
   'chevron-right': <path d="m9 18 6-6-6-6" />,
   'chevron-down': <path d="m6 9 6 6 6-6" />,
+  cloud: (
+    <>
+      <path d="M17.5 19a3.5 3.5 0 0 0 5 0H6.5a3.5 3.5 0 0 0 3.5 3.42V7.75a3.5 3.5 0 0 0-2.27-3.27L5 2h14z" />
+      <path d="M9.5 11.5 12 14l2.5-2.5" />
+    </>
+  ),
+  image: (
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-4.5-4.5L7 21" />
+    </>
+  ),
   folder: <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />,
   file: (
     <>

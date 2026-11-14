@@ -1,4 +1,4 @@
-import { AppError, type CleanupStatus } from '@flashspace/shared';
+import { ACTIVITY_ACTIONS, AppError, type CleanupStatus } from '@flashspace/shared';
 import type { DataLayer } from '../repositories/data-layer.interface.js';
 import type { StorageAdapter } from '../storage/index.js';
 import { newId } from '../utils/ids.js';
@@ -40,6 +40,18 @@ export class CleanupService {
       startedAt: new Date().toISOString(),
       finishedAt: null,
       error: null,
+    });
+
+    // Worker-generated events name SYSTEM as the actor, never the Space owner
+    // or the user who happened to trigger the job.
+    await this.db.activity.append({
+      spaceId,
+      action: ACTIVITY_ACTIONS.CLEANUP_STARTED,
+      actorType: 'SYSTEM',
+      category: 'CLEANUP',
+      resourceType: 'space',
+      resourceId: spaceId,
+      metadata: { runId, archiveId },
     });
 
     let membershipsRevoked = 0;
@@ -92,6 +104,17 @@ export class CleanupService {
         finishedAt: new Date().toISOString(),
         error: failureMessage,
       });
+      await this.db.activity.append({
+        spaceId,
+        action: hadFailure ? ACTIVITY_ACTIONS.CLEANUP_PARTIAL_FAILED : ACTIVITY_ACTIONS.CLEANUP_COMPLETED,
+        actorType: 'SYSTEM',
+        category: 'CLEANUP',
+        outcome: hadFailure ? 'FAILURE' : 'SUCCESS',
+        resourceType: 'space',
+        resourceId: spaceId,
+        reason: failureMessage,
+        metadata: { runId, archiveId, membershipsRevoked, objectsDeleted, status },
+      });
       return { membershipsRevoked, objectsDeleted, status };
     } catch (err) {
       await this.db.cleanupRuns.update(runId, {
@@ -100,6 +123,17 @@ export class CleanupService {
         objectsDeleted,
         finishedAt: new Date().toISOString(),
         error: err instanceof Error ? err.message : String(err),
+      });
+      await this.db.activity.append({
+        spaceId,
+        action: ACTIVITY_ACTIONS.CLEANUP_FAILED,
+        actorType: 'SYSTEM',
+        category: 'CLEANUP',
+        outcome: 'FAILURE',
+        resourceType: 'space',
+        resourceId: spaceId,
+        reason: err instanceof Error ? err.message : String(err),
+        metadata: { runId, archiveId, membershipsRevoked, objectsDeleted },
       });
       throw err;
     }

@@ -8,9 +8,11 @@ import { fmtBytes } from '../lib/format';
 export default function ProfilePage({
   user,
   onUserUpdated,
+  navigate,
 }: {
   user: AuthUser;
   onUserUpdated: (user: AuthUser) => void;
+  navigate: (to: string) => void;
 }) {
   const toast = useToast().toast;
   const [displayName, setDisplayName] = useState(user.displayName);
@@ -64,9 +66,14 @@ export default function ProfilePage({
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
-      <div>
-        <h1 className="font-display text-[22px] font-bold tracking-tight text-primary">Profile</h1>
-        <p className="mt-0.5 text-[13px] text-muted">Your identity and a snapshot of what you own.</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="page-title">Profile</h1>
+          <p className="mt-0.5 text-[13px] text-muted">Your identity and a snapshot of what you own.</p>
+        </div>
+        <button onClick={() => navigate('/settings')} className="btn-secondary px-3 py-1.5 text-[12px]">
+          Account settings
+        </button>
       </div>
 
       <div className="rounded-xl border border-line bg-white p-6 shadow-xs">
@@ -108,7 +115,11 @@ export default function ProfilePage({
           </label>
           <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
             <Icon name="lock" size={13} />
-            Email and password are managed by the API; 1–80 characters for the display name.
+            Display name is 1–80 characters. Picture, email and password live in{' '}
+            <button onClick={() => navigate('/settings')} className="font-medium text-flash-600 hover:underline">
+              account settings
+            </button>
+            .
           </p>
         </form>
       </div>

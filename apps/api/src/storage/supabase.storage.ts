@@ -25,10 +25,34 @@ export class SupabaseStorageAdapter implements StorageAdapter {
     serviceKey: string,
     private readonly bucket: string,
     private readonly signedUrlExpirySeconds = 600,
+    client?: SupabaseClient,
   ) {
-    this.client = createClient(supabaseUrl, serviceKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+    // The client is injectable so the adapter contract can be tested without a
+    // live Supabase project; production always builds the service-role client.
+    this.client =
+      client ??
+      createClient(supabaseUrl, serviceKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+  }
+
+  /** Best-effort MIME type from the object key (uploads always set one). */
+  private contentTypeFor(key: string): string {
+    const ext = key.slice(key.lastIndexOf('.') + 1).toLowerCase();
+    const map: Record<string, string> = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      gif: 'image/gif',
+      webp: 'image/webp',
+      pdf: 'application/pdf',
+      txt: 'text/plain; charset=utf-8',
+      csv: 'text/csv; charset=utf-8',
+      json: 'application/json',
+      zip: 'application/zip',
+      md: 'text/markdown; charset=utf-8',
+    };
+    return map[ext] ?? 'application/octet-stream';
   }
 
   async createSignedUploadUrl(key: string, expiresInSeconds: number): Promise<SignedUrl> {
@@ -54,11 +78,14 @@ export class SupabaseStorageAdapter implements StorageAdapter {
     key: string,
     expiresInSeconds: number,
     downloadName?: string,
+    inlineMime?: string,
   ): Promise<SignedUrl> {
+    // No `download` option means the provider serves the object inline, which
+    // is what previews need; a download name forces an attachment.
     const { data, error } = await this.client.storage
       .from(this.bucket)
       .createSignedUrl(key, expiresInSeconds, {
-        download: downloadName ?? true,
+        ...(inlineMime ? {} : { download: downloadName ?? true }),
       });
     if (error || !data?.signedUrl) {
       throw new AppError('STORAGE_ERROR', `Failed to create download URL: ${error?.message ?? 'unknown'}`);
@@ -82,11 +109,11 @@ export class SupabaseStorageAdapter implements StorageAdapter {
     const payload = Buffer.isBuffer(body) ? body : await streamToBuffer(body, MAX_BUFFERED_UPLOAD_BYTES);
     const { error } = await this.client.storage.from(this.bucket).upload(key, payload, {
       upsert: true,
-      contentType: 'application/octet-stream',
+      contentType: this.contentTypeFor(key),
     });
     if (error) throw new AppError('STORAGE_ERROR', `Upload failed: ${error.message}`);
     const head = await this.headObject(key);
-    return { key, size: head.size, etag: null };
+    return { key, size: head.size, etag: head.etag };
   }
 
   async getObject(key: string): Promise<Readable> {

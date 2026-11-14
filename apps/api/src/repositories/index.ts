@@ -6,6 +6,7 @@ import type { Env } from '../config/env.js';
 import type { DataLayer } from './data-layer.interface.js';
 import { MemoryDataLayer } from './memory/data-layer.js';
 import { SqliteDataLayer } from './sqlite/sqlite.data-layer.js';
+import { createPostgresDataLayer } from './postgres/data-layer.js';
 
 export type { DataLayer } from './data-layer.interface.js';
 export { MemoryDataLayer } from './memory/data-layer.js';
@@ -18,11 +19,9 @@ export function createDataLayer(env: Env): DataLayer {
     case 'memory':
       return new MemoryDataLayer();
     case 'postgres':
-      throw new Error(
-        'REPO_MODE=postgres is not wired up in this build. Use REPO_MODE=sqlite for a ' +
-          'persistent local database (default) or REPO_MODE=memory for ephemeral state. ' +
-          'The Postgres schema and runner live in src/repositories/postgres/.',
-      );
+      // No silent fallback: a missing URL is a configuration error, and a
+      // connection failure is surfaced at boot by server.ts before listening.
+      return createPostgresDataLayer(env);
     default:
       return new MemoryDataLayer();
   }

@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
 import { AppError, toErrorBody } from '@flashspace/shared';
+import { redactError } from '../utils/redact.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
@@ -27,7 +28,9 @@ export function errorMiddleware(
   const body = toErrorBody(err, req.requestId);
   if (body.code === 'INTERNAL') {
     // Detail goes to the server log only; the client never sees it (PRD §8.1).
-    console.error(`[request ${req.requestId}]`, err);
+    // Module 14: the logged form is redacted so provider errors, connection
+    // strings and tokens never reach the log stream.
+    console.error(`[request ${req.requestId}]`, redactError(err));
   }
   const status =
     err instanceof AppError

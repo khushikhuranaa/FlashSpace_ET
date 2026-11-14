@@ -21,11 +21,16 @@ export interface StorageAdapter {
   /** Returns a short-lived URL the browser can PUT the object to directly. */
   createSignedUploadUrl(key: string, expiresInSeconds: number): Promise<SignedUrl>;
 
-  /** Returns a short-lived GET URL; `downloadName` sets Content-Disposition. */
+  /**
+   * Returns a short-lived GET URL. `downloadName` forces an attachment
+   * download; passing `inlineMime` instead asks the provider to serve the
+   * object inline with that MIME type (used by previews only).
+   */
   createSignedDownloadUrl(
     key: string,
     expiresInSeconds: number,
     downloadName?: string,
+    inlineMime?: string,
   ): Promise<SignedUrl>;
 
   /** Uploads from the server (used by the archive engine, never the browser). */

@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+.git
+.github
+data
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.env
+**/.env.*
+!**/.env.example
+docs
+landing-*.png

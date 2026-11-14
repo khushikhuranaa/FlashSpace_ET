@@ -21,6 +21,14 @@ async function call(path, { method = 'GET', token, body } = {}) {
   return json;
 }
 
+/**
+ * The local storage adapter hands back signed URLs relative to the API
+ * (`/storage-upload?token=…`); Node's fetch needs an absolute URL.
+ */
+function absoluteUrl(url) {
+  return /^https?:\/\//.test(url) ? url : `${API}${url.startsWith('/') ? '' : '/'}${url}`;
+}
+
 const users = [
   { email: 'admin@demo.dev', name: 'Ada Admin' },
   { email: 'owner@demo.dev', name: 'Olive Owner' },
@@ -74,7 +82,7 @@ for (const f of files) {
     token: owner,
     body: { name: f.name, mimeType: 'text/plain', sizeBytes: f.body.length },
   });
-  await fetch(init.url, { method: 'PUT', body: f.body });
+  await fetch(absoluteUrl(init.url), { method: 'PUT', body: f.body });
   await call(`/spaces/${launch.space.id}/files/${init.fileId}/confirm-upload`, { method: 'POST', token: owner });
   console.log(`uploaded ${f.name}`);
 }
@@ -94,7 +102,7 @@ const init = await call(`/spaces/${expired.space.id}/files/init-upload`, {
   token: owner,
   body: { name: 'retro-notes.md', mimeType: 'text/markdown', sizeBytes: 44 },
 });
-await fetch(init.url, { method: 'PUT', body: '# Retro\n\nWhat went well: everything.\n' });
+await fetch(absoluteUrl(init.url), { method: 'PUT', body: '# Retro\n\nWhat went well: everything.\n' });
 await call(`/spaces/${expired.space.id}/files/${init.fileId}/confirm-upload`, { method: 'POST', token: owner });
 console.log('space    Retro Sprint 12 (expires in the past → archives on next lifecycle run)');
 

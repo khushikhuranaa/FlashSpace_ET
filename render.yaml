@@ -1,0 +1,113 @@
+# FlashSpace cloud deployment (Render + Supabase) — Module 15
+#
+# The API runs as a long-lived container because the lifecycle worker, signed
+# URL streaming and Express middleware need a persistent process. Postgres is
+# the production database: REPO_MODE=postgres selects the Postgres data layer,
+# and the schema is applied with `npm run db:migrate -w @flashspace/api` before
+# the first start (see docs/CLOUD_DEPLOYMENT.md). Storage and Auth are Supabase.
+
+services:
+  - type: web
+    name: flashspace-api
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: TRUST_PROXY
+        value: 1
+      - key: REQUIRE_HTTPS
+        value: true
+      - key: AUTH_MODE
+        value: supabase
+      - key: REPO_MODE
+        value: postgres
+      # Apply pending migrations on boot; the runner holds a Postgres advisory
+      # lock, so multiple instances cannot race.
+      - key: RUN_MIGRATIONS_ON_BOOT
+        value: "true"
+      - key: STORAGE_MODE
+        value: supabase
+      - key: WEB_ORIGIN
+        sync: false
+      - key: WEB_APP_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: AVATARS_BUCKET
+        value: avatars
+      - key: SUPABASE_FILES_BUCKET
+        value: space-files
+      - key: SUPABASE_VAULT_BUCKET
+        value: vault-archives
+      - key: SUPABASE_TEMP_BUCKET
+        value: archive-temp
+      - key: LOCAL_AUTH_SECRET
+        generateValue: true
+      - key: JOB_SECRET
+        generateValue: true
+      - key: EMAIL_TRANSPORT
+        value: smtp
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+
+  # Scheduler: Render cron calls the authenticated lifecycle endpoint. The
+  # endpoint is idempotent per (date, space, phase), so a missed or duplicated
+  # run is harmless. Replace the URL with the deployed API host.
+  # Static frontend. The Vite build is fully static; hash routing needs a single
+  # SPA rewrite so deep links and refreshes resolve to index.html.
+  - type: web
+    name: flashspace-web
+    runtime: static
+    plan: free
+    buildCommand: npm ci --no-audit --no-fund && npm run build --workspace @flashspace/shared && npm run build --workspace @flashspace/web
+    staticPublishPath: ./apps/web/dist
+    envVars:
+      - key: VITE_AUTH_MODE
+        value: supabase
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+  - type: cron
+    name: flashspace-lifecycle
+    runtime: node
+    plan: starter
+    schedule: "*/10 * * * *"
+    buildCommand: "echo 'no build required'"
+    startCommand: "node apps/api/scripts/run-lifecycle.mjs"
+    envVars:
+      - key: API_BASE_URL
+        sync: false
+      - key: JOB_SECRET
+        sync: false

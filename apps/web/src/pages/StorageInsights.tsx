@@ -9,6 +9,7 @@ import type {
   SpaceDetail,
   StorageInsights as Insights,
 } from '../types';
+import { StatusBadge } from '../components/ui';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -27,13 +28,6 @@ function fmtDateTime(iso: string | null): string {
     minute: '2-digit',
   });
 }
-
-const STATUS_STYLES: Record<string, string> = {
-  PENDING: 'bg-slate-100 text-slate-600',
-  RUNNING: 'bg-blue-100 text-blue-700',
-  VERIFIED: 'bg-emerald-100 text-emerald-700',
-  FAILED: 'bg-red-100 text-red-700',
-};
 
 function Icon({ path, className = 'h-4 w-4' }: { path: string; className?: string }) {
   return (
@@ -240,10 +234,10 @@ export default function StorageInsights({
   return (
     <div>
       <button
-        className="mb-4 flex items-center gap-1 text-sm text-slate-500 hover:text-slate-700 transition-colors"
+        className="mb-4 flex items-center gap-1.5 text-sm font-medium text-flash-700 hover:text-flash-800 transition-colors"
         onClick={goBack}
       >
-        <Icon path={ICONS.back} />
+        <Icon path={ICONS.back} className="h-4 w-4" />
         Back
       </button>
 
@@ -251,11 +245,9 @@ export default function StorageInsights({
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-bold">{space?.name ?? 'Space'}</h1>
-              <span className={`badge ${STATUS_STYLES[scanStatus] ?? 'bg-slate-100 text-slate-600'}`}>
-                scan: {scanStatus}
-              </span>
-              {space && <span className="badge bg-slate-100 text-slate-600">{space.status}</span>}
+              <h1 className="font-display text-xl font-bold tracking-tight text-primary">{space?.name ?? 'Space'}</h1>
+              <StatusBadge status={scanStatus} label={`Scan: ${scanStatus.toLowerCase()}`} />
+              {space && <StatusBadge status={space.status} />}
             </div>
             <p className="mt-1 text-sm text-slate-500">
               Review what this Space stores before it expires. The default archive always contains every file.

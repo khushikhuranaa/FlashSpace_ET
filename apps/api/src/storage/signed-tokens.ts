@@ -11,14 +11,25 @@ export interface SignedTokenPayload {
   key: string;
   exp: number; // unix seconds
   filename?: string;
+  /** Set for inline previews so the response can use the real MIME type. */
+  mime?: string;
 }
 
 export function signStorageToken(
-  payload: { method: 'PUT' | 'GET'; key: string; expiresInSeconds: number; filename?: string },
+  payload: { method: 'PUT' | 'GET'; key: string; expiresInSeconds: number; filename?: string; mime?: string },
   secret: string,
 ): { token: string; expiresAt: string } {
   const exp = Math.floor(Date.now() / 1000) + payload.expiresInSeconds;
-  const body = Buffer.from(JSON.stringify({ method: payload.method, key: payload.key, exp, filename: payload.filename }), 'utf8').toString('base64url');
+  const body = Buffer.from(
+    JSON.stringify({
+      method: payload.method,
+      key: payload.key,
+      exp,
+      filename: payload.filename,
+      mime: payload.mime,
+    }),
+    'utf8',
+  ).toString('base64url');
   const mac = createHmac('sha256', secret).update(body).digest('base64url');
   return { token: `${body}.${mac}`, expiresAt: new Date(exp * 1000).toISOString() };
 }

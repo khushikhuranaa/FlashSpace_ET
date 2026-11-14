@@ -119,6 +119,10 @@ export class MemoryFoldersRepo implements FoldersRepo {
     this.folders.set(id, next);
     return next;
   }
+
+  delete(id: string): boolean {
+    return this.folders.delete(id);
+  }
 }
 
 export class MemoryInvitationsRepo implements InvitationsRepo {
@@ -149,6 +153,10 @@ export class MemoryInvitationsRepo implements InvitationsRepo {
     const next = { ...inv, ...patch };
     this.invitations.set(id, next);
     return next;
+  }
+
+  listAll(): SpaceInvitation[] {
+    return [...this.invitations.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 }
 

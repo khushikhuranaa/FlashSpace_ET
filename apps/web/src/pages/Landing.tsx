@@ -44,9 +44,11 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
   return (
     <div className="min-h-screen bg-surface">
       <nav className="sticky top-0 z-20 border-b border-slate-200/70 bg-white/75 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-3">
-            <span className="font-display text-xl font-bold tracking-tight text-primary">FlashSpace</span>
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-2 px-4 py-3 sm:px-6 sm:py-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="whitespace-nowrap font-display text-lg font-bold tracking-tight text-primary sm:text-xl">
+              FlashSpace
+            </span>
           </div>
           <div className="hidden items-center gap-8 text-sm font-medium text-muted md:flex">
             <button onClick={scrollTo('highlights')} className="transition-colors hover:text-primary">
@@ -59,18 +61,19 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
               Principles
             </button>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-shrink-0 items-center gap-1 sm:gap-2">
             <button
               onClick={onEnter}
-              className="rounded-lg px-3 py-2 text-sm font-medium text-muted transition-colors hover:text-primary"
+              className="whitespace-nowrap rounded-lg px-2 py-2 text-[13px] font-medium text-muted transition-colors hover:text-primary sm:px-3 sm:text-sm"
             >
               Sign in
             </button>
             <button
               onClick={onEnter}
-              className="inline-flex items-center justify-center rounded-lg bg-flash-600 px-4 py-2 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-flash-700"
+              className="inline-flex items-center justify-center whitespace-nowrap rounded-lg bg-flash-600 px-3 py-2 text-[13px] font-semibold text-white shadow-xs transition-colors hover:bg-flash-700 sm:px-4 sm:text-sm"
             >
-              Launch FlashSpace
+              <span className="sm:hidden">Launch</span>
+              <span className="hidden sm:inline">Launch FlashSpace</span>
             </button>
           </div>
         </div>
@@ -78,11 +81,11 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
 
       <main className="relative overflow-hidden">
         <div className="pointer-events-none absolute inset-0" aria-hidden="true">
-          <div className="absolute left-1/2 top-0 h-[520px] w-[720px] -translate-x-1/2 rounded-full bg-gradient-to-tr from-flash-100/60 via-purple-100/30 to-blue-50/50 blur-3xl" />
-          <div className="absolute inset-0 bg-[linear-gradient(to_right,#6366f108_1px,transparent_1px),linear-gradient(to_bottom,#6366f108_1px,transparent_1px)] bg-[size:48px_48px]" />
+          <div className="absolute left-1/2 top-0 h-[520px] w-[720px] -translate-x-1/2 rounded-full bg-gradient-to-tr from-flash-50/80 via-flash-100/30 to-white/40 blur-3xl" />
+          <div className="absolute inset-0 bg-[linear-gradient(to_right,#0D948808_1px,transparent_1px),linear-gradient(to_bottom,#0D948808_1px,transparent_1px)] bg-[size:48px_48px]" />
         </div>
 
-        <section className="relative z-10 mx-auto flex max-w-4xl flex-col items-center px-6 pb-16 pt-20 text-center">
+        <section className="relative z-10 mx-auto flex max-w-4xl flex-col items-center px-4 pb-14 pt-14 text-center sm:px-6 sm:pb-16 sm:pt-20">
           <span className="inline-flex items-center gap-2 rounded-full border border-flash-200/70 bg-flash-50/80 px-3 py-1 text-xs font-medium text-flash-700">
             Autonomous cloud workspaces
           </span>
@@ -211,7 +214,21 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
             <span className="h-2 w-2 rounded-full bg-emerald-500" />
             <span>All systems operational</span>
           </div>
-          <span className="text-slate-400">2026 FlashSpace Cloud Technologies</span>
+          <div className="flex flex-wrap items-center gap-4">
+            <a
+              href="#/privacy"
+              className="rounded hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-flash-500"
+            >
+              Privacy
+            </a>
+            <a
+              href="#/terms"
+              className="rounded hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-flash-500"
+            >
+              Terms
+            </a>
+            <span className="text-slate-400">2026 FlashSpace Cloud Technologies</span>
+          </div>
         </div>
       </footer>
     </div>

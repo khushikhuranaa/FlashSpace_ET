@@ -1,5 +1,5 @@
 import type { AuthUser, ExtensionRequest } from '@flashspace/shared';
-import { AppError } from '@flashspace/shared';
+import { ACTIVITY_ACTIONS, AppError } from '@flashspace/shared';
 import type { Env } from '../config/env.js';
 import type { DataLayer } from '../repositories/data-layer.interface.js';
 import { newId } from '../utils/ids.js';
@@ -39,6 +39,11 @@ export class ExtensionService {
       status: 'PENDING',
       decidedBy: null,
       decidedAt: null,
+      rejectionReason: null,
+      adminNote: null,
+      previousExpiryAt: null,
+      newExpiryAt: null,
+      approvalMethod: null,
       createdAt: new Date().toISOString(),
     };
     await this.db.extensionRequests.insert(req);
@@ -51,7 +56,7 @@ export class ExtensionService {
     });
 
     if (this.env.extensionPolicy === 'AUTO') {
-      return this.decide(actor, req.id, 'APPROVED');
+      return this.decide(actor, req.id, 'APPROVED', 'AUTOMATIC');
     }
     // Notify OWNER + admins that a decision is awaited.
     await this.spaces.notify(
@@ -64,8 +69,15 @@ export class ExtensionService {
     return req;
   }
 
-  async decide(actor: AuthUser, requestId: string, decision: 'APPROVED' | 'REJECTED'): Promise<ExtensionRequest> {
-    if ((await this.db.auth.findById(actor.id))?.role !== 'ADMIN') {
+  async decide(
+    actor: AuthUser,
+    requestId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    method: 'MANUAL' | 'AUTOMATIC' = 'MANUAL',
+  ): Promise<ExtensionRequest> {
+    // An automatic policy decision is made by the system, not by the requester,
+    // so it must not be gated on (or attributed to) an administrator.
+    if (method === 'MANUAL' && (await this.db.auth.findById(actor.id))?.role !== 'ADMIN') {
       throw new AppError('ADMIN_REQUIRED', 'Only admins can decide extension requests');
     }
     const req = await this.db.extensionRequests.findById(requestId);
@@ -74,16 +86,24 @@ export class ExtensionService {
       throw new AppError('REQUEST_ALREADY_DECIDED', 'This request has already been decided');
     }
     const space = await this.db.spaces.findById(req.spaceId);
+    // The authoritative expiry values come from the persisted Space row, never
+    // from a client-supplied date.
+    const previousExpiryAt = space?.expiryAt ?? null;
+    let newExpiryAt: string | null = null;
+    if (decision === 'APPROVED' && space) {
+      const newExpiry = new Date(space.expiryAt);
+      newExpiry.setDate(newExpiry.getDate() + req.requestedDays);
+      newExpiryAt = newExpiry.toISOString();
+      await this.db.spaces.update(space.id, { expiryAt: newExpiryAt, status: 'ACTIVE' });
+    }
     const updated = await this.db.extensionRequests.update(requestId, {
       status: decision,
       decidedBy: actor.id,
       decidedAt: new Date().toISOString(),
+      previousExpiryAt,
+      newExpiryAt,
+      approvalMethod: method,
     });
-    if (decision === 'APPROVED' && space) {
-      const newExpiry = new Date(space.expiryAt);
-      newExpiry.setDate(newExpiry.getDate() + req.requestedDays);
-      await this.db.spaces.update(space.id, { expiryAt: newExpiry.toISOString(), status: 'ACTIVE' });
-    }
     await this.spaces.notify(
       req.requesterId,
       req.spaceId,
@@ -94,12 +114,35 @@ export class ExtensionService {
         : 'Your extension request was rejected by an admin.',
     );
     await this.db.activity.append({
-      userId: actor.id,
+      userId: method === 'AUTOMATIC' ? null : actor.id,
       spaceId: req.spaceId,
       fileId: null,
       action: decision === 'APPROVED' ? 'EXTENSION_APPROVED' : 'EXTENSION_REJECTED',
-      metadata: { requestId, days: req.requestedDays },
+      actorType: method === 'AUTOMATIC' ? 'SYSTEM' : 'ADMIN',
+      category: 'EXTENSION',
+      resourceType: 'extension_request',
+      resourceId: requestId,
+      reason: method === 'AUTOMATIC' ? 'automatic-policy-approval' : null,
+      metadata: {
+        requestId,
+        days: req.requestedDays,
+        requesterId: req.requesterId,
+        previousExpiryAt,
+        newExpiryAt,
+        approvalMethod: method,
+      },
     });
+    if (method === 'AUTOMATIC') {
+      await this.db.activity.append({
+        spaceId: req.spaceId,
+        action: ACTIVITY_ACTIONS.EXTENSION_AUTO_DECIDED,
+        actorType: 'SYSTEM',
+        category: 'EXTENSION',
+        resourceType: 'extension_request',
+        resourceId: requestId,
+        metadata: { requestId, decision, requesterId: req.requesterId },
+      });
+    }
     return updated!;
   }
 

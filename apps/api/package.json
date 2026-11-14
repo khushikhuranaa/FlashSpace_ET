@@ -7,18 +7,23 @@
     "dev": "tsx watch src/server.ts",
     "db:migrate": "tsx src/repositories/postgres/migrate.ts",
     "start": "node dist/server.js",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-sql-assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:status": "tsx src/repositories/postgres/migrate.ts --status",
+    "db:dry-run": "tsx src/repositories/postgres/migrate.ts --dry-run",
+    "db:import": "tsx scripts/db-import.ts"
   },
   "dependencies": {
     "@flashspace/shared": "1.0.0",
     "@supabase/supabase-js": "^2.47.10",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "jose": "^6.2.17",
     "nodemailer": "^6.9.16",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

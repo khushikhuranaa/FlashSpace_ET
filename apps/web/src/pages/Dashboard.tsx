@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import type { Archive, AuthUser, SpaceDetail, StorageSummary } from '../types';
+import type { AccountView } from '../api';
+import type {
+  Archive,
+  AuthUser,
+  DashboardSummary,
+  SpaceDetail,
+  StorageSummary,
+} from '../types';
 import { SpaceCard } from '../components/SpaceCard';
 import { StatCard } from '../components/StatCard';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { useToast } from '../components/ToastProvider';
 import { Icon } from '../components/Icon';
-import { compactRemaining, fmtBytes, fmtDate, toDateTimeLocal } from '../lib/format';
+import {
+  compactRemaining,
+  fmtBytes,
+  fmtDate,
+  timeAgo,
+  toDateTimeLocal,
+} from '../lib/format';
 
 type Filter = 'all' | 'ACTIVE' | 'WARNING' | 'ARCHIVED';
 
@@ -15,6 +28,36 @@ function greeting(): string {
   if (hour < 12) return 'Good morning';
   if (hour < 17) return 'Good afternoon';
   return 'Good evening';
+}
+
+const ACTION_LABELS: Record<string, string> = {
+  SPACE_CREATED: 'Space created',
+  SPACE_UPDATED: 'Space details updated',
+  SPACE_FINALIZED: 'Space finalized',
+  SPACE_WARNING_SENT: 'Expiry warning sent',
+  SPACE_ARCHIVED: 'Space archived',
+  SPACE_EXTENDED: 'Deadline extended',
+  FILE_UPLOADED: 'File uploaded',
+  FILE_DELETED: 'File deleted',
+  FILE_RENAMED: 'File renamed',
+  FOLDER_CREATED: 'Folder created',
+  MEMBER_JOINED: 'Member joined',
+  MEMBER_ROLE_CHANGED: 'Member role changed',
+  MEMBER_REVOKED: 'Member removed',
+  INVITATION_CREATED: 'Invitation sent',
+  ARCHIVE_COMPLETED: 'Archive completed',
+  ARCHIVE_VERIFIED: 'Archive verified',
+};
+
+function actionLabel(action: string): string {
+  return (
+    ACTION_LABELS[action] ??
+    action
+      .toLowerCase()
+      .split('_')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ')
+  );
 }
 
 export default function Dashboard({
@@ -26,8 +69,12 @@ export default function Dashboard({
 }) {
   const toast = useToast().toast;
   const [spaces, setSpaces] = useState<SpaceDetail[]>([]);
-  const [storage, setStorage] = useState<StorageSummary | null>(null);
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [account, setAccount] = useState<AccountView | null>(null);
   const [archives, setArchives] = useState<Archive[]>([]);
+  const [storage, setStorage] = useState<StorageSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<Filter>('all');
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -35,49 +82,50 @@ export default function Dashboard({
   const [pending, setPending] = useState<{ kind: 'archive' | 'delete'; space: SpaceDetail } | null>(null);
 
   const load = useCallback(async () => {
-    const [spaceList, summary, vault] = await Promise.all([
+    // Spaces drive the workspace grid; the summary carries every dashboard
+    // section. Both come from the same authenticated, server-authorized APIs.
+    const [spaceList, dashboard, vault] = await Promise.all([
       api.listSpaces(),
-      api.storageSummary(),
+      api.dashboardSummary(),
       api.vault(),
     ]);
     setSpaces(spaceList.spaces);
-    setStorage(summary);
+    setSummary(dashboard);
+    setStorage(dashboard.storage);
     setArchives(vault.archives);
+    // Avatar/email come from the account API when the provider supports it.
+    api
+      .accountMe()
+      .then((r) => setAccount(r.account))
+      .catch(() => setAccount(null));
   }, []);
 
   useEffect(() => {
-    load().catch((e) => setError(e instanceof Error ? e.message : 'Could not load your Spaces'));
+    load()
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load your dashboard'))
+      .finally(() => setLoading(false));
   }, [load]);
 
+  const refresh = async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not refresh the dashboard');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const spaceById = useMemo(() => new Map(spaces.map((s) => [s.id, s])), [spaces]);
-
-  const now = Date.now();
-  const counts = useMemo(() => {
-    const live = spaces.filter((s) => ['DRAFT', 'ACTIVE', 'WARNING', 'ARCHIVING'].includes(s.status));
-    const expiring = spaces.filter(
-      (s) =>
-        s.status === 'WARNING' ||
-        (['ACTIVE', 'DRAFT'].includes(s.status) && new Date(s.expiryAt).getTime() - now < 48 * 3_600_000),
-    );
-    return {
-      all: spaces.length,
-      active: live.length,
-      expiring: expiring.length,
-      archived: spaces.filter((s) => s.status === 'ARCHIVED').length,
-    };
-  }, [spaces, now]);
-
-  const expiringSpaces = spaces.filter(
-    (s) =>
-      s.status === 'WARNING' ||
-      (['ACTIVE', 'DRAFT'].includes(s.status) && new Date(s.expiryAt).getTime() - now < 48 * 3_600_000),
-  );
+  const counts = summary?.counts ?? { total: 0, active: 0, expiring: 0, archived: 0 };
 
   const visible = useMemo(() => {
     if (filter === 'all') return spaces;
-    if (filter === 'WARNING') return expiringSpaces;
+    if (filter === 'WARNING') return spaces.filter((s) => summary?.expiring.some((e) => e.id === s.id));
     return spaces.filter((s) => s.status === filter);
-  }, [filter, spaces, expiringSpaces]);
+  }, [filter, spaces, summary]);
 
   const doArchive = async (space: SpaceDetail) => {
     setBusy(true);
@@ -107,105 +155,416 @@ export default function Dashboard({
     }
   };
 
-  const usedPercent = storage && storage.quotaBytes > 0
-    ? Math.min(100, Math.round((storage.usedBytes / storage.quotaBytes) * 100))
-    : 0;
+  const usedBytes = storage?.usedBytes ?? 0;
+  const quotaBytes = storage?.quotaBytes ?? 0;
+  const archivedBytes = storage?.archivedBytes ?? 0;
+  const activeBytes = Math.max(0, usedBytes - archivedBytes);
+  const freeBytes = storage?.freeBytes ?? Math.max(0, quotaBytes - usedBytes);
+  const usedPercent = quotaBytes > 0 ? Math.min(100, Math.round((usedBytes / quotaBytes) * 100)) : 0;
+  const archivedPercent = quotaBytes > 0 ? Math.min(100, (archivedBytes / quotaBytes) * 100) : 0;
+  const activePercent = quotaBytes > 0 ? Math.min(100 - archivedPercent, (activeBytes / quotaBytes) * 100) : 0;
+
+  const initials = user.displayName
+    .split(' ')
+    .map((part) => part.charAt(0))
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
 
   return (
     <div className="space-y-6">
-      <section className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="font-display text-[22px] font-bold tracking-tight text-primary">
-            {greeting()}, {user.displayName.split(' ')[0]}
-          </h1>
-          <p className="mt-0.5 text-[13px] text-muted">
-            Manage your temporary workspaces, countdowns, and archives.
-          </p>
-        </div>
-        <button
-          onClick={() => setShowForm((open) => !open)}
-          className="btn-primary self-start px-3.5 py-2"
-        >
-          <Icon name={showForm ? 'x' : 'plus'} size={16} />
-          {showForm ? 'Close form' : 'Create New Space'}
-        </button>
-      </section>
-
-      {showForm && <CreateSpaceForm onCreated={(id) => navigate(`/spaces/${id}`)} onCancel={() => setShowForm(false)} />}
-
-      <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          label="Active Spaces"
-          value={counts.active}
-          hint="Ephemeral workspaces"
-          icon="grid"
-        />
-        <StatCard
-          label="Expiring Soon"
-          value={counts.expiring}
-          hint="Requires action (under 48h)"
-          chip="Requires action"
-        />
-        <StatCard
-          label="Ephemeral Storage"
-          value={fmtBytes(storage?.usedBytes ?? 0)}
-          hint={`of ${fmtBytes(storage?.quotaBytes ?? 0)} allocated`}
-        >
-          <div className="mt-2 space-y-1.5">
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-              <div className="h-full rounded-full bg-flash-600" style={{ width: `${usedPercent}%` }} />
-            </div>
-            <p className="font-mono text-[11px] text-muted">{usedPercent}% used</p>
+      {/* ---- Personalized welcome ---------------------------------------- */}
+      <section className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-3">
+          {account?.avatarUrl ? (
+            <img
+              src={account.avatarUrl}
+              alt=""
+              className="h-11 w-11 flex-shrink-0 rounded-full object-cover ring-1 ring-line"
+            />
+          ) : (
+            <span className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full bg-flash-600 text-[13px] font-bold text-white">
+              {initials}
+            </span>
+          )}
+          <div className="min-w-0">
+            {loading ? (
+              <div className="space-y-2">
+                <div className="skeleton h-6 w-56 rounded" />
+                <div className="skeleton h-3.5 w-72 rounded" />
+              </div>
+            ) : (
+              <>
+                <h1 className="page-title">
+                  {greeting()}, {user.displayName.split(' ')[0]}
+                </h1>
+                <p className="mt-0.5 text-[13px] text-muted">
+                  Here is what is happening across the workspaces you can access.
+                </p>
+              </>
+            )}
           </div>
-        </StatCard>
-        <StatCard
-          label="Vault Archives"
-          value={`${archives.length} ZIP${archives.length === 1 ? '' : 's'}`}
-          hint="Verified snapshots stored"
-          icon="archive"
-        />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={refresh}
+            disabled={refreshing}
+            className="btn-secondary px-3 py-2 text-[13px]"
+            title="Refresh dashboard data"
+          >
+            <Icon name="refresh" size={15} className={refreshing ? 'animate-spin' : undefined} />
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
+          <button onClick={() => navigate('/vault')} className="btn-secondary px-3 py-2 text-[13px]">
+            <Icon name="archive" size={15} />
+            Vault
+          </button>
+          <button onClick={() => navigate('/my-spaces')} className="btn-secondary px-3 py-2 text-[13px]">
+            <Icon name="layers" size={15} />
+            My Spaces
+          </button>
+          <button onClick={() => setShowForm((open) => !open)} className="btn-primary px-3.5 py-2">
+            <Icon name={showForm ? 'x' : 'plus'} size={16} />
+            {showForm ? 'Close form' : 'Create Space'}
+          </button>
+        </div>
       </section>
+
+      {showForm && (
+        <CreateSpaceForm onCreated={(id) => navigate(`/spaces/${id}`)} onCancel={() => setShowForm(false)} />
+      )}
 
       {error && (
-        <p className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700">
-          <Icon name="alert-circle" size={16} />
-          {error}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700">
+          <span className="flex items-center gap-2">
+            <Icon name="alert-circle" size={16} />
+            {error}
+          </span>
+          <button onClick={refresh} className="font-medium underline">
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* ---- Statistics --------------------------------------------------- */}
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6" aria-label="Account statistics">
+        {loading ? (
+          Array.from({ length: 6 }).map((_, index) => (
+            <div key={index} className="rounded-xl border border-line bg-white p-4 shadow-xs">
+              <div className="skeleton h-3 w-16 rounded" />
+              <div className="skeleton mt-3 h-6 w-12 rounded" />
+              <div className="skeleton mt-2 h-3 w-20 rounded" />
+            </div>
+          ))
+        ) : (
+          <>
+            <StatCard label="Total Spaces" value={counts.total} hint="Owned and shared" icon="layers" />
+            <StatCard label="Active Spaces" value={counts.active} hint="In the ACTIVE state" icon="grid" />
+            <StatCard
+              label="Expiring Soon"
+              value={counts.expiring}
+              hint="Inside the warning window"
+              chip={counts.expiring > 0 ? 'Requires action' : undefined}
+              icon="clock"
+            />
+            <StatCard label="Archived" value={counts.archived} hint="Sealed in your Vault" icon="archive" />
+            <StatCard
+              label="Storage Used"
+              value={fmtBytes(usedBytes)}
+              hint={`${usedPercent}% of ${fmtBytes(quotaBytes)}`}
+            />
+            <StatCard
+              label="Storage Available"
+              value={fmtBytes(freeBytes)}
+              hint={freeBytes === 0 ? 'Quota reached' : 'Remaining in your quota'}
+            />
+          </>
+        )}
+      </section>
+
+      {summary && summary.errors.length > 0 && (
+        <p className="rounded-lg bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+          Some dashboard sections could not be loaded ({summary.errors.join(', ')}). Everything else below is live data.
         </p>
       )}
 
-      {expiringSpaces.length > 0 && (
-        <section className="space-y-2">
-          {expiringSpaces.map((space) => (
-            <div
-              key={space.id}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"
-            >
-              <span className="flex items-center gap-2 text-[13px] text-amber-800">
-                <Icon name="alert" size={15} />
-                <strong className="font-semibold">{space.name}</strong>
-                <span className="text-amber-700">
-                  closes in {compactRemaining(space.expiryAt)} — request an extension before it archives.
-                </span>
-              </span>
-              <button
-                onClick={() => navigate(`/spaces/${space.id}/extensions`)}
-                className="rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-[12px] font-medium text-amber-800 transition-colors hover:bg-amber-100"
-              >
-                Review
-              </button>
-            </div>
-          ))}
-        </section>
-      )}
+      <div className="grid gap-4 xl:grid-cols-3">
+        {/* ---- Storage chart --------------------------------------------- */}
+        <section className="rounded-xl border border-line bg-white p-4 shadow-xs xl:col-span-1">
+          <div className="flex items-center justify-between">
+            <h2 className="font-display text-[15px] font-bold tracking-tight text-primary">Storage</h2>
+            <span className="font-mono text-[11px] text-muted">{usedPercent}% used</span>
+          </div>
 
+          {loading ? (
+            <div className="skeleton mt-4 h-3 w-full rounded-full" />
+          ) : quotaBytes === 0 ? (
+            <p className="mt-4 text-[12px] text-muted">No quota is configured for this account.</p>
+          ) : (
+            <>
+              <div
+                className="mt-4 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100"
+                role="img"
+                aria-label={`${fmtBytes(usedBytes)} of ${fmtBytes(quotaBytes)} used`}
+              >
+                <div className="h-full bg-flash-600" style={{ width: `${activePercent}%` }} />
+                <div className="h-full bg-flash-600" style={{ width: `${archivedPercent}%` }} />
+              </div>
+              <dl className="mt-4 space-y-2 text-[12px]">
+                <div className="flex items-center justify-between">
+                  <dt className="flex items-center gap-2 text-muted">
+                    <span className="h-2 w-2 rounded-full bg-flash-600" /> Live files
+                  </dt>
+                  <dd className="font-mono text-primary">{fmtBytes(activeBytes)}</dd>
+                </div>
+                <div className="flex items-center justify-between">
+                  <dt className="flex items-center gap-2 text-muted">
+                    <span className="h-2 w-2 rounded-full bg-flash-600" /> Vault archives
+                  </dt>
+                  <dd className="font-mono text-primary">{fmtBytes(archivedBytes)}</dd>
+                </div>
+                <div className="flex items-center justify-between border-t border-slate-100 pt-2">
+                  <dt className="text-muted">Available of {fmtBytes(quotaBytes)}</dt>
+                  <dd className="font-mono font-semibold text-primary">{fmtBytes(freeBytes)}</dd>
+                </div>
+              </dl>
+            </>
+          )}
+        </section>
+
+        {/* ---- Recent activity ------------------------------------------- */}
+        <section className="rounded-xl border border-line bg-white p-4 shadow-xs xl:col-span-1">
+          <div className="flex items-center justify-between">
+            <h2 className="font-display text-[15px] font-bold tracking-tight text-primary">Recent activity</h2>
+            <Icon name="activity" size={15} className="text-slate-400" />
+          </div>
+          {loading ? (
+            <div className="mt-3 space-y-2">
+              {[0, 1, 2, 3].map((row) => (
+                <div key={row} className="skeleton h-9 w-full rounded-lg" />
+              ))}
+            </div>
+          ) : (summary?.activity.length ?? 0) === 0 ? (
+            <p className="mt-4 text-[12px] text-muted">
+              No activity yet. Creating a Space, uploading a file or inviting a member appears here.
+            </p>
+          ) : (
+            <ul className="mt-3 divide-y divide-slate-100">
+              {summary!.activity.map((item) => (
+                <li key={item.id}>
+                  <button
+                    onClick={() => item.spaceId && navigate(`/spaces/${item.spaceId}/activity`)}
+                    disabled={!item.spaceId}
+                    className="flex w-full items-start gap-2.5 py-2 text-left disabled:cursor-default"
+                  >
+                    <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-flash-500" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12.5px] text-primary">
+                        {actionLabel(item.action)}
+                        {item.spaceName ? <span className="text-muted"> · {item.spaceName}</span> : null}
+                      </span>
+                      <span className="block text-[11px] text-muted">
+                        {item.actorName ? `${item.actorName} · ` : ''}
+                        {timeAgo(item.createdAt)}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* ---- Expiry reminders ------------------------------------------ */}
+        <section className="rounded-xl border border-line bg-white p-4 shadow-xs xl:col-span-1">
+          <div className="flex items-center justify-between">
+            <h2 className="font-display text-[15px] font-bold tracking-tight text-primary">Closing soon</h2>
+            <Icon name="clock" size={15} className="text-slate-400" />
+          </div>
+          {loading ? (
+            <div className="mt-3 space-y-2">
+              {[0, 1, 2].map((row) => (
+                <div key={row} className="skeleton h-12 w-full rounded-lg" />
+              ))}
+            </div>
+          ) : (summary?.expiring.length ?? 0) === 0 ? (
+            <p className="mt-4 text-[12px] text-muted">
+              Nothing is inside the {`warning window`} right now. Spaces you own or belong to show here as their
+              deadline approaches.
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-2">
+              {summary!.expiring.map((item) => (
+                <li key={item.id}>
+                  <button
+                    onClick={() => navigate(`/spaces/${item.id}/extensions`)}
+                    className="w-full rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-left transition-colors hover:bg-amber-100"
+                  >
+                    <span className="flex items-center justify-between gap-2">
+                      <span className="truncate text-[12.5px] font-semibold text-amber-900">{item.name}</span>
+                      <span className="flex-shrink-0 rounded-full bg-white px-2 py-0.5 font-mono text-[10px] uppercase text-amber-700">
+                        {item.status}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 block text-[11px] text-amber-800">
+                      {item.remainingMs <= 0
+                        ? 'Deadline passed — archiving is due'
+                        : `Closes in ${compactRemaining(item.expiryAt)} · ${fmtDate(item.expiryAt)}`}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-3">
+        {/* ---- Recent uploads -------------------------------------------- */}
+        <section className="rounded-xl border border-line bg-white p-4 shadow-xs xl:col-span-2">
+          <div className="flex items-center justify-between">
+            <h2 className="font-display text-[15px] font-bold tracking-tight text-primary">Recent uploads</h2>
+            <Icon name="upload" size={15} className="text-slate-400" />
+          </div>
+          {loading ? (
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {[0, 1, 2, 3].map((row) => (
+                <div key={row} className="skeleton h-12 w-full rounded-lg" />
+              ))}
+            </div>
+          ) : (summary?.recentUploads.length ?? 0) === 0 ? (
+            <div className="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center">
+              <Icon name="upload" size={22} className="mx-auto text-slate-300" />
+              <p className="mt-2 text-[12px] text-muted">
+                No uploads yet in the Spaces you can access. Open a Space and upload a file to see it here.
+              </p>
+            </div>
+          ) : (
+            <ul className="mt-3 divide-y divide-slate-100">
+              {summary!.recentUploads.map((file) => (
+                <li key={file.id}>
+                  <button
+                    onClick={() => navigate(`/spaces/${file.spaceId}/files`)}
+                    className="flex w-full items-center gap-3 py-2 text-left"
+                  >
+                    <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                      <Icon name="file" size={14} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12.5px] font-medium text-primary">{file.name}</span>
+                      <span className="block truncate text-[11px] text-muted">
+                        {file.spaceName}
+                        {file.uploaderName ? ` · ${file.uploaderName}` : ''} · {timeAgo(file.uploadedAt)}
+                      </span>
+                    </span>
+                    <span className="flex-shrink-0 font-mono text-[10px] text-slate-400">
+                      {fmtBytes(file.sizeBytes)}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* ---- Recently accessed + invitations --------------------------- */}
+        <div className="space-y-4">
+          <section className="rounded-xl border border-line bg-white p-4 shadow-xs">
+            <div className="flex items-center justify-between">
+              <h2 className="font-display text-[15px] font-bold tracking-tight text-primary">Recently accessed</h2>
+              <Icon name="clock" size={15} className="text-slate-400" />
+            </div>
+            {loading ? (
+              <div className="mt-3 space-y-2">
+                {[0, 1].map((row) => (
+                  <div key={row} className="skeleton h-10 w-full rounded-lg" />
+                ))}
+              </div>
+            ) : (summary?.recentSpaces.length ?? 0) === 0 ? (
+              <p className="mt-4 text-[12px] text-muted">
+                Spaces you open are listed here with the time you last worked in them.
+              </p>
+            ) : (
+              <ul className="mt-3 space-y-1">
+                {summary!.recentSpaces.map((space) => (
+                  <li key={space.id}>
+                    <button
+                      onClick={() => navigate(`/spaces/${space.id}`)}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-1.5 py-1.5 text-left transition-colors hover:bg-slate-50"
+                    >
+                      <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-flash-50 text-[10px] font-bold text-flash-700">
+                        {space.name.slice(0, 2).toUpperCase()}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[12.5px] font-medium text-primary">{space.name}</span>
+                        <span className="block truncate text-[11px] text-muted">
+                          {space.ownerName ?? 'Unknown owner'} · {space.memberCount} member
+                          {space.memberCount === 1 ? '' : 's'} · {timeAgo(space.lastAccessedAt ?? space.expiryAt)}
+                        </span>
+                      </span>
+                      <span className="flex-shrink-0 font-mono text-[10px] uppercase text-slate-400">
+                        {space.status}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="rounded-xl border border-line bg-white p-4 shadow-xs">
+            <div className="flex items-center justify-between">
+              <h2 className="font-display text-[15px] font-bold tracking-tight text-primary">Invitations</h2>
+              <Icon name="mail" size={15} className="text-slate-400" />
+            </div>
+            {loading ? (
+              <div className="mt-3 space-y-2">
+                {[0, 1].map((row) => (
+                  <div key={row} className="skeleton h-12 w-full rounded-lg" />
+                ))}
+              </div>
+            ) : (summary?.invitations.length ?? 0) === 0 ? (
+              <p className="mt-4 text-[12px] text-muted">
+                No pending invitations. Invitations addressed to your email, and join requests awaiting a decision,
+                appear here.
+              </p>
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {summary!.invitations.map((invite) => (
+                  <li key={`${invite.kind}-${invite.id}`} className="rounded-lg border border-slate-200 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-[12.5px] font-semibold text-primary">{invite.spaceName}</span>
+                      <span className="flex-shrink-0 rounded-full bg-flash-50 px-2 py-0.5 font-mono text-[10px] font-semibold text-flash-700">
+                        {invite.role}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-muted">
+                      {invite.inviterName ? `From ${invite.inviterName} · ` : ''}
+                      {invite.kind === 'EMAIL' ? 'Email invitation' : 'Join request awaiting approval'}
+                      {invite.expiresAt ? ` · expires ${fmtDate(invite.expiresAt)}` : ''}
+                    </p>
+                    <button
+                      onClick={() => navigate('/notifications')}
+                      className="mt-1 text-[11px] font-medium text-flash-700 hover:underline"
+                    >
+                      Open in notifications
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      </div>
+
+      {/* ---- Workspaces --------------------------------------------------- */}
       <section className="space-y-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="font-display text-base font-bold tracking-tight text-primary">
-            Your Workspaces
-          </h2>
+          <h2 className="font-display text-base font-bold tracking-tight text-primary">Your Workspaces</h2>
           <div className="inline-flex flex-wrap gap-1 rounded-lg bg-slate-100/90 p-1 text-[12px] font-medium text-muted">
             {([
-              ['all', `All (${counts.all})`],
+              ['all', `All (${counts.total})`],
               ['ACTIVE', `Active (${counts.active})`],
               ['WARNING', `Expiring (${counts.expiring})`],
               ['ARCHIVED', `Archived (${counts.archived})`],
@@ -215,9 +574,7 @@ export default function Dashboard({
                 onClick={() => setFilter(value)}
                 aria-pressed={filter === value}
                 className={`rounded-md px-2.5 py-1 transition-colors ${
-                  filter === value
-                    ? 'bg-white font-semibold text-primary shadow-xs'
-                    : 'hover:text-primary'
+                  filter === value ? 'bg-white font-semibold text-primary shadow-xs' : 'hover:text-primary'
                 }`}
               >
                 {label}
@@ -226,7 +583,13 @@ export default function Dashboard({
           </div>
         </div>
 
-        {visible.length > 0 ? (
+        {loading ? (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {[0, 1].map((row) => (
+              <div key={row} className="skeleton h-40 w-full rounded-xl" />
+            ))}
+          </div>
+        ) : visible.length > 0 ? (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {visible.map((space) => (
               <SpaceCard
@@ -234,7 +597,11 @@ export default function Dashboard({
                 space={space}
                 onOpen={() => navigate(`/spaces/${space.id}`)}
                 canManage={space.role === 'OWNER'}
-                onArchive={space.role === 'OWNER' && space.status !== 'ARCHIVED' ? () => setPending({ kind: 'archive', space }) : undefined}
+                onArchive={
+                  space.role === 'OWNER' && space.status !== 'ARCHIVED'
+                    ? () => setPending({ kind: 'archive', space })
+                    : undefined
+                }
                 onDelete={space.role === 'OWNER' ? () => setPending({ kind: 'delete', space }) : undefined}
               />
             ))}
@@ -260,6 +627,7 @@ export default function Dashboard({
         )}
       </section>
 
+      {/* ---- Vault preview ------------------------------------------------ */}
       <section>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="font-display text-base font-bold tracking-tight text-primary">Your Vault</h2>
@@ -284,7 +652,7 @@ export default function Dashboard({
                 className="flex items-center justify-between rounded-xl border border-line bg-white p-4 text-left shadow-xs transition-colors hover:border-slate-300"
               >
                 <span className="flex min-w-0 items-center gap-3">
-                  <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-flash-500 to-purple-500 text-white">
+                  <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-flash-500 to-flash-700 text-white">
                     <Icon name="archive" size={18} />
                   </span>
                   <span className="min-w-0">
@@ -438,13 +806,10 @@ function CreateSpaceForm({
 
       <p className="mt-3 flex items-start gap-2 rounded-lg bg-slate-50 px-3 py-2 text-[12px] text-muted">
         <Icon name="shield" size={15} className="mt-0.5 flex-shrink-0 text-slate-400" />
-        File size and per-Space quotas are enforced by the API. Members can be invited after the
-        Space exists.
+        File size and per-Space quotas are enforced by the API. Members can be invited after the Space exists.
       </p>
 
-      {error && (
-        <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700">{error}</p>
-      )}
+      {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700">{error}</p>}
 
       <div className="mt-5 flex justify-end gap-2">
         <button type="button" className="btn-secondary" onClick={onCancel} disabled={busy}>

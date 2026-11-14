@@ -35,7 +35,7 @@ export function miscRoutes(
   router.post(
     '/notifications/:notificationId/read',
     asyncHandler(async (req: Request, res: Response) => {
-      // Ownership is checked BEFORE the write: marking first let any signed-in
+      // Ownership is checked BEFORE the write: marking first lets any signed-in
       // user flip another user's notification to "read".
       const notificationId = req.params.notificationId!;
       const existing = await db.notifications.findById(notificationId);
@@ -66,7 +66,38 @@ export function miscRoutes(
   router.get(
     '/vault/archives',
     asyncHandler(async (req: Request, res: Response) => {
-      res.json({ archives: await archives.listVault(req.user!) });
+      const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      const sort = (typeof req.query.sort === 'string' ? req.query.sort : 'newest') as 'newest' | 'oldest' | 'size-asc' | 'size-desc';
+      const int = (v: unknown): number | undefined => {
+        if (typeof v !== 'string' || !v) return undefined;
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : undefined;
+      };
+      const filtered = await archives.listVaultFiltered(req.user!, { q, status, sort });
+      const page = await archives.listVaultFiltered(req.user!, { q, status, sort, limit: int(req.query.limit), offset: int(req.query.offset) });
+      res.json({ archives: page.archives, total: filtered.total });
+    }),
+  );
+
+  router.get(
+    '/vault/archives/:archiveId',
+    asyncHandler(async (req: Request, res: Response) => {
+      res.json(await archives.getArchive(req.user!, req.params.archiveId!));
+    }),
+  );
+
+  router.get(
+    '/vault/archives/:archiveId/files',
+    asyncHandler(async (req: Request, res: Response) => {
+      res.json(await archives.getArchiveFiles(req.user!, req.params.archiveId!));
+    }),
+  );
+
+  router.post(
+    '/vault/archives/:archiveId/verify',
+    asyncHandler(async (req: Request, res: Response) => {
+      res.json(await archives.verifyArchive(req.user!, req.params.archiveId!));
     }),
   );
 
@@ -77,7 +108,48 @@ export function miscRoutes(
     }),
   );
 
-  // -- Admin extension decisions -------------------------------------------
+  router.post(
+    '/vault/archives/:archiveId/manifest',
+    asyncHandler(async (req: Request, res: Response) => {
+      res.json(await archives.downloadManifest(req.user!, req.params.archiveId!));
+    }),
+  );
+
+  // -- Admin: CSV export of the current user's vault (filtered) -----------
+
+  router.get(
+    '/vault/archives/export-csv',
+    asyncHandler(async (req: Request, res: Response) => {
+      const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      const sort = (typeof req.query.sort === 'string' ? req.query.sort : 'newest') as 'newest' | 'oldest' | 'size-asc' | 'size-desc';
+      const data = await archives.listVaultFiltered(req.user!, { q, status, sort, limit: 10000, offset: 0 });
+      const header = ['Archive', 'Source Space', 'Status', 'Files', 'Size (bytes)', 'Created', 'Verified', 'Checksum'];
+      const detailRecords = await Promise.all(data.archives.map(async (a) => ({
+        archive: a,
+        detail: await archives.getArchive(req.user!, a.id),
+      })));
+      const rows = [
+        header,
+        ...detailRecords.map(({ archive: a, detail }) => [
+          CSVField(`${a.spaceId}.zip`),
+          CSVField(detail.spaceName ?? 'Removed Space'),
+          CSVField(a.status),
+          String(a.fileCount),
+          String(a.sizeBytes),
+          CSVField(a.createdAt),
+          CSVField(a.verifiedAt ?? ''),
+          CSVField(a.checksum ?? ''),
+        ]),
+      ];
+      const csv = rows.map((r) => r.join(',')).join('\n');
+      res.setHeader('Content-Type', 'text/csv;charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="flashspace-vault-export.csv"');
+      res.send(csv);
+    }),
+  );
+
+  // -- Admin extension decisions ------------------------------------------
 
   router.get(
     '/admin/extensions/pending',
@@ -100,4 +172,12 @@ export function miscRoutes(
   );
 
   return router;
+}
+
+/** Escape a CSV field to prevent formula injection and cell-breaks. */
+function CSVField(value: string): string {
+  if (value.includes(',') || value.includes('"') || value.includes('\n') || value.startsWith('=')) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
 }

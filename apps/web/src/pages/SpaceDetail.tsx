@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, uploadViaSignedUrl } from '../api';
+import { api } from '../api';
 import type {
   AuthUser,
   ExtensionRequest,
-  FileRecord,
-  Folder,
   JoinRequestView,
   MembersPayload,
   PendingInviteView,
+  DuplicateSpaceResult,
+  SpaceStorageBreakdown,
   SpaceDetail as SpaceDetailType,
 } from '../types';
 import { Icon } from '../components/Icon';
 import { StatCard } from '../components/StatCard';
+import { SpaceFiles } from '../components/SpaceFiles';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { PromptDialog } from '../components/PromptDialog';
+import { StatusBadge } from '../components/ui';
 import { useToast } from '../components/ToastProvider';
 import {
   compactRemaining,
@@ -24,7 +25,6 @@ import {
   timeAgo,
   toDateTimeLocal,
 } from '../lib/format';
-import { triggerDownload } from '../lib/download';
 
 const TABS = ['overview', 'files', 'members', 'extensions', 'activity', 'settings'] as const;
 type Tab = (typeof TABS)[number];
@@ -38,21 +38,10 @@ const TAB_LABEL: Record<Tab, string> = {
   settings: 'Settings',
 };
 
-const STATUS_STYLES: Record<string, string> = {
-  DRAFT: 'bg-slate-100 text-slate-600 border border-slate-200',
-  ACTIVE: 'bg-emerald-50 text-emerald-700 border border-emerald-200',
-  WARNING: 'bg-amber-50 text-amber-700 border border-amber-200',
-  ARCHIVING: 'bg-blue-50 text-blue-700 border border-blue-200',
-  ARCHIVED: 'bg-purple-50 text-purple-700 border border-purple-200',
-  ARCHIVE_FAILED: 'bg-red-50 text-red-700 border border-red-200',
-  DELETED: 'bg-slate-100 text-slate-500 border border-slate-200',
-};
-
 type PendingAction =
   | { kind: 'archive' }
   | { kind: 'delete' }
-  | { kind: 'revoke'; userId: string; name: string }
-  | { kind: 'delete-file'; file: FileRecord };
+  | { kind: 'revoke'; userId: string; name: string };
 
 export default function SpaceDetail({
   id,
@@ -69,40 +58,49 @@ export default function SpaceDetail({
 }) {
   const toast = useToast().toast;
   const [space, setSpace] = useState<SpaceDetailType | null>(null);
-  const [files, setFiles] = useState<FileRecord[]>([]);
-  const [folders, setFolders] = useState<Folder[]>([]);
-  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [storage, setStorage] = useState<SpaceStorageBreakdown | null>(null);
+  // Kept for the tab badge and overview counters only; the files tab owns its
+  // own listing state inside `SpaceFiles`.
   const [membersPayload, setMembersPayload] = useState<MembersPayload | null>(null);
   const [extensions, setExtensions] = useState<ExtensionRequest[]>([]);
-  const [activity, setActivity] = useState<{ id: number; action: string; createdAt: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<'EDITOR' | 'VIEWER'>('VIEWER');
   const [extDays, setExtDays] = useState(3);
   const [extReason, setExtReason] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const [prompt, setPrompt] = useState<{ kind: 'folder' } | { kind: 'rename'; file: FileRecord } | null>(null);
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
-  const fileInput = useRef<HTMLInputElement>(null);
 
   const activeTab: Tab = (TABS as readonly string[]).includes(tab ?? '') ? (tab as Tab) : 'files';
 
   const load = useCallback(async () => {
-    const s = await api.getSpace(id);
+    // These four reads are independent. The old sequential chain also fetched
+    // the full file list and the legacy activity feed, neither of which this
+    // page renders (SpaceFiles owns its own listing and the Audit log panel
+    // owns paginated activity). Those two requests are gone.
+    const [s, members, extensionList, storageBreakdown] = await Promise.all([
+      api.getSpace(id),
+      api.listMembers(id),
+      api.listExtensions(id),
+      api.spaceStorage(id).catch(() => null),
+    ]);
     setSpace(s.space);
-    setFiles((await api.listFiles(id)).files);
-    setFolders((await api.listFolders(id)).folders);
-    setMembersPayload(await api.listMembers(id));
-    setExtensions((await api.listExtensions(id)).requests);
-    setActivity((await api.activity(id)).activity);
+    setMembersPayload(members);
+    setExtensions(extensionList.requests);
+    // Real backend accounting for the Space; never derived from the browser.
+    setStorage(storageBreakdown);
   }, [id]);
 
   useEffect(() => {
     setError(null);
     load().catch((e) => setError(e instanceof Error ? e.message : 'Failed to load this Space'));
+  }, [load]);
+
+  // Stable identity: SpaceFiles keeps this in a ref, but an inline arrow here
+  // still re-renders every child on each parent update for no reason.
+  const refreshSpace = useCallback(() => {
+    void load().catch(() => undefined);
   }, [load]);
 
   useEffect(() => {
@@ -118,103 +116,24 @@ export default function SpaceDetail({
 
   const go = (next: Tab) => navigate(`/spaces/${id}/${next}`);
 
-  const breadcrumb: Folder[] = useMemo(() => {
-    const chain: Folder[] = [];
-    let cursor = folders.find((f) => f.id === currentFolderId);
-    while (cursor) {
-      chain.unshift(cursor);
-      cursor = cursor.parentId ? folders.find((f) => f.id === cursor!.parentId) : undefined;
+  const toggleFavorite = async () => {
+    if (!space) return;
+    const next = !space.favorite;
+    setSpace({ ...space, favorite: next });
+    try {
+      if (next) await api.favoriteSpace(space.id);
+      else await api.unfavoriteSpace(space.id);
+      toast(next ? 'Added to favourites' : 'Removed from favourites', 'success');
+    } catch (e) {
+      setSpace({ ...space, favorite: !next });
+      toast(e instanceof Error ? e.message : 'Could not update favourites', 'error');
     }
-    return chain;
-  }, [folders, currentFolderId]);
-
-  const childFolders = useMemo(
-    () => folders.filter((f) => f.parentId === currentFolderId).sort((a, b) => a.name.localeCompare(b.name)),
-    [folders, currentFolderId],
-  );
-  const visibleFiles = useMemo(
-    () => files.filter((f) => (f.folderId ?? null) === currentFolderId),
-    [files, currentFolderId],
-  );
+  };
 
   const members = membersPayload?.members ?? [];
   const pendingInvites: PendingInviteView[] = membersPayload?.pending ?? [];
   const joinRequests: JoinRequestView[] = membersPayload?.joinRequests ?? [];
   const inviteLink = membersPayload?.inviteLink ?? null;
-
-  const onUpload = async (list: FileList | null) => {
-    if (!list || list.length === 0) return;
-    setUploading(true);
-    setError(null);
-    try {
-      for (const file of Array.from(list)) {
-        let fileId: string | null = null;
-        try {
-          const init = await api.initUpload(
-            id,
-            file.name,
-            file.type || 'application/octet-stream',
-            file.size,
-            currentFolderId,
-          );
-          fileId = init.fileId;
-          await uploadViaSignedUrl(init.url, file);
-          await api.confirmUpload(id, init.fileId);
-        } catch (err) {
-          // Do not leave a PENDING row behind: it would count towards storage and
-          // break archiving later because its object was never stored.
-          if (fileId) await api.deleteFile(id, fileId).catch(() => undefined);
-          throw err;
-        }
-      }
-      await load();
-      toast(`${list.length} file${list.length === 1 ? '' : 's'} uploaded`, 'success');
-    } catch (e) {
-      const message = e instanceof Error ? e.message : 'Upload failed';
-      setError(message);
-      toast(message, 'error');
-    } finally {
-      setUploading(false);
-      if (fileInput.current) fileInput.current.value = '';
-    }
-  };
-
-  const createFolder = async (name: string) => {
-    setBusy(true);
-    try {
-      await api.createFolder(id, name, currentFolderId);
-      await load();
-      setPrompt(null);
-      toast('Folder created', 'success');
-    } catch (e) {
-      toast(e instanceof Error ? e.message : 'Could not create the folder', 'error');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const renameFile = async (file: FileRecord, name: string) => {
-    setBusy(true);
-    try {
-      await api.renameFile(id, file.id, name);
-      await load();
-      setPrompt(null);
-      toast('File renamed', 'success');
-    } catch (e) {
-      toast(e instanceof Error ? e.message : 'Rename failed', 'error');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const download = async (fileId: string) => {
-    try {
-      const { url } = await api.downloadFile(id, fileId);
-      triggerDownload(url, files.find((f) => f.id === fileId)?.name);
-    } catch (e) {
-      toast(e instanceof Error ? e.message : 'Download failed', 'error');
-    }
-  };
 
   const invite = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -262,14 +181,10 @@ export default function SpaceDetail({
         await api.deleteSpace(id);
         toast('Space deleted', 'success');
         navigate('/dashboard');
-      } else if (pending.kind === 'revoke') {
+      } else {
         await api.revokeMember(id, pending.userId);
         await load();
         toast(`${pending.name} removed from the Space`, 'success');
-      } else {
-        await api.deleteFile(id, pending.file.id);
-        await load();
-        toast('File deleted', 'success');
       }
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Action failed', 'error');
@@ -285,9 +200,14 @@ export default function SpaceDetail({
     return (
       <div className="card">
         <p className="text-[13px] text-red-600">{error}</p>
-        <button className="btn-secondary mt-3" onClick={goBack}>
-          Back
-        </button>
+        <div className="mt-3 flex gap-2">
+          <button className="btn-secondary" onClick={goBack}>
+            Back
+          </button>
+          <button className="btn-secondary" onClick={() => navigate('/my-spaces')}>
+            My Spaces
+          </button>
+        </div>
       </div>
     );
   }
@@ -302,8 +222,8 @@ export default function SpaceDetail({
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted">
-        <button onClick={() => navigate('/dashboard')} className="hover:text-primary">
-          Spaces
+        <button onClick={() => navigate('/my-spaces')} className="hover:text-primary">
+          My Spaces
         </button>
         <Icon name="chevron-right" size={14} className="text-slate-400" />
         <span className="font-medium text-primary">{space.name}</span>
@@ -314,8 +234,21 @@ export default function SpaceDetail({
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="font-display text-xl font-bold tracking-tight text-primary">{space.name}</h1>
-              <span className={`badge ${STATUS_STYLES[space.status] ?? ''}`}>{space.status}</span>
+              <StatusBadge status={space.status} />
               <span className="badge bg-flash-50 text-flash-700">you: {space.role ?? 'ADMIN'}</span>
+              <button
+                onClick={() => void toggleFavorite()}
+                aria-pressed={Boolean(space.favorite)}
+                aria-label={space.favorite ? 'Remove from favourites' : 'Add to favourites'}
+                className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ${
+                  space.favorite
+                    ? 'border-amber-200 bg-amber-50 text-amber-700'
+                    : 'border-line bg-white text-muted hover:text-amber-600'
+                }`}
+              >
+                <Icon name={space.favorite ? 'star-filled' : 'star'} size={13} />
+                {space.favorite ? 'Favourited' : 'Favourite'}
+              </button>
             </div>
             <p className="mt-2 text-[13px] text-muted">{space.purpose}</p>
             {space.description && <p className="mt-1 text-[13px] text-slate-500">{space.description}</p>}
@@ -335,7 +268,7 @@ export default function SpaceDetail({
               <p
                 className={`font-mono text-[15px] font-semibold ${
                   readOnlyArchive
-                    ? 'text-purple-600'
+                    ? 'text-flash-600'
                     : remaining.expired
                       ? 'text-red-600'
                       : remaining.ms < 3_600_000
@@ -417,19 +350,18 @@ export default function SpaceDetail({
 
       {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700">{error}</p>}
 
-      <div className="flex flex-wrap gap-1 rounded-xl border border-line bg-white p-1 shadow-xs">
+      <div className="tab-list" role="tablist" aria-label="Space sections">
         {TABS.map((value) => (
           <button
             key={value}
+            role="tab"
+            aria-selected={activeTab === value}
             onClick={() => go(value)}
-            aria-pressed={activeTab === value}
-            className={`flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-[13px] font-medium transition-colors ${
-              activeTab === value ? 'bg-flash-600 text-white' : 'text-muted hover:bg-slate-50 hover:text-primary'
-            }`}
+            className={`tab flex-1 justify-center ${activeTab === value ? 'tab-active' : ''}`}
           >
             {TAB_LABEL[value]}
             {value === 'files' && (
-              <span className="ml-1.5 font-mono opacity-70">{files.length}</span>
+              <span className="ml-1.5 font-mono opacity-70">{storage?.fileCount ?? 0}</span>
             )}
           </button>
         ))}
@@ -438,7 +370,7 @@ export default function SpaceDetail({
       {activeTab === 'overview' && (
         <section className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <StatCard label="Files" value={files.length} hint="Active objects in this Space" icon="file" />
+            <StatCard label="Files" value={storage?.fileCount ?? 0} hint="Active objects in this Space" icon="file" />
             <StatCard label="Members" value={activeMembers} hint={`${joinRequests.filter((r) => r.status === 'PENDING').length} pending request(s)`} icon="users" />
             <StatCard
               label="Time remaining"
@@ -447,6 +379,48 @@ export default function SpaceDetail({
               icon="clock"
             />
           </div>
+          <div className="rounded-xl border border-line bg-white p-5 shadow-xs">
+            <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Space details</h2>
+            <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <Meta label="Purpose" value={space.purpose} />
+              <Meta label="Owner" value={space.ownerName ?? (space.ownerId === user.id ? user.displayName : '—')} />
+              <Meta label="Created" value={fmtDateTime(space.createdAt)} />
+              <Meta label="Members" value={`${activeMembers} active`} />
+              <Meta label="Starts" value={fmtDateTime(space.startAt)} />
+              <Meta label="Expires" value={fmtDateTime(space.expiryAt)} />
+              <Meta label="Storage used" value={fmtBytes(space.storageUsedBytes)} mono />
+              <Meta label="Last opened" value={space.lastAccessedAt ? timeAgo(space.lastAccessedAt) : 'Just now'} />
+            </div>
+            {space.description && (
+              <p className="mt-3 border-t border-line pt-3 text-[13px] leading-relaxed text-slate-600">
+                {space.description}
+              </p>
+            )}
+          </div>
+
+          {storage && (
+            <div className="rounded-xl border border-line bg-white p-5 shadow-xs">
+              <div className="flex items-center justify-between">
+                <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Storage</h2>
+                <span className="font-mono text-[11px] text-muted">{storage.percentUsed}% of quota</span>
+              </div>
+              <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                <div className="h-full rounded-full bg-flash-600" style={{ width: `${storage.percentUsed}%` }} />
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Meta label="Used" value={fmtBytes(storage.usedBytes)} mono />
+                <Meta label="Available" value={fmtBytes(storage.freeBytes)} mono />
+                <Meta label="Files" value={String(storage.fileCount)} />
+                <Meta label="Folders" value={String(storage.folderCount)} />
+              </div>
+              {storage.archivedBytes > 0 && (
+                <p className="mt-3 border-t border-line pt-3 text-[11px] text-muted">
+                  {fmtBytes(storage.archivedBytes)} preserved in verified archives (not counted against live storage).
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="rounded-xl border border-line bg-white p-5 shadow-xs">
             <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">
               What happens at the end
@@ -482,176 +456,13 @@ export default function SpaceDetail({
       )}
 
       {activeTab === 'files' && (
-        <section className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-1 text-[13px]">
-              <button
-                onClick={() => setCurrentFolderId(null)}
-                className={`rounded px-2 py-1 transition-colors ${
-                  currentFolderId === null ? 'font-medium text-primary' : 'text-muted hover:bg-slate-100'
-                }`}
-              >
-                All files
-              </button>
-              {breadcrumb.map((folder) => (
-                <span key={folder.id} className="flex items-center gap-1">
-                  <Icon name="chevron-right" size={12} className="text-slate-400" />
-                  <button
-                    onClick={() => setCurrentFolderId(folder.id)}
-                    className="rounded px-2 py-1 text-muted transition-colors hover:bg-slate-100 hover:text-primary"
-                  >
-                    {folder.name}
-                  </button>
-                </span>
-              ))}
-            </div>
-            {canEdit && (
-              <div className="flex gap-2">
-                <button className="btn-secondary px-3 py-1.5 text-[12px]" onClick={() => setPrompt({ kind: 'folder' })}>
-                  <Icon name="folder" size={14} />
-                  New folder
-                </button>
-                <button
-                  className="btn-primary px-3 py-1.5 text-[12px]"
-                  onClick={() => fileInput.current?.click()}
-                  disabled={uploading}
-                >
-                  <Icon name="upload" size={14} />
-                  {uploading ? 'Uploading…' : 'Upload files'}
-                </button>
-              </div>
-            )}
-          </div>
-
-          {canEdit ? (
-            <div
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragOver(true);
-              }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(event) => {
-                event.preventDefault();
-                setDragOver(false);
-                void onUpload(event.dataTransfer.files);
-              }}
-              onClick={() => fileInput.current?.click()}
-              className={`cursor-pointer rounded-xl border-2 border-dashed p-8 text-center transition-colors ${
-                dragOver ? 'border-flash-500 bg-flash-50' : 'border-line bg-white hover:border-flash-400 hover:bg-flash-50/40'
-              }`}
-            >
-              <input
-                ref={fileInput}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(event) => void onUpload(event.target.files)}
-              />
-              <Icon name="upload" size={36} className="mx-auto text-slate-300" />
-              <p className="mt-2 text-[14px] font-semibold text-primary">
-                {uploading ? 'Uploading…' : 'Drop files here or click to upload'}
-              </p>
-              <p className="mt-1 text-[12px] text-muted">
-                Uploading to {breadcrumb.length ? breadcrumb[breadcrumb.length - 1]!.path : 'the Space root'}
-              </p>
-            </div>
-          ) : (
-            <p className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] text-muted">
-              <Icon name="lock" size={14} />
-              {readOnlyArchive
-                ? 'This Space is archived and read-only. Download the ZIP from the Vault.'
-                : 'You have view-only access to this Space.'}
-              {readOnlyArchive && (
-                <button onClick={() => navigate('/vault')} className="font-medium text-flash-700 hover:underline">
-                  Open Vault
-                </button>
-              )}
-            </p>
-          )}
-
-          <div className="overflow-hidden rounded-xl border border-line bg-white shadow-xs">
-            {childFolders.map((folder) => (
-              <button
-                key={folder.id}
-                onClick={() => setCurrentFolderId(folder.id)}
-                className="flex w-full items-center justify-between gap-3 border-b border-line/70 px-5 py-3 text-left transition-colors hover:bg-slate-50"
-              >
-                <span className="flex min-w-0 items-center gap-2">
-                  <Icon name="folder" size={16} className="flex-shrink-0 text-slate-400" />
-                  <span className="truncate text-[13px] font-medium text-primary">{folder.name}</span>
-                </span>
-                <span className="flex-shrink-0 font-mono text-[11px] text-muted">{folder.path}</span>
-              </button>
-            ))}
-
-            {visibleFiles.map((file) => (
-              <div
-                key={file.id}
-                className="flex flex-wrap items-center justify-between gap-3 border-b border-line/70 px-5 py-3 last:border-b-0"
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <Icon name="file" size={16} className="flex-shrink-0 text-flash-600" />
-                  <div className="min-w-0">
-                    <p className="flex items-center gap-1.5 truncate text-[13px] font-medium text-primary">
-                      {file.name}
-                      {file.status !== 'ACTIVE' && (
-                        <span className="badge bg-amber-50 text-amber-700">{file.status}</span>
-                      )}
-                    </p>
-                    <p className="text-[11px] text-muted">
-                      {fmtBytes(file.sizeBytes)} · uploaded {fmtDate(file.createdAt)}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex flex-shrink-0 items-center gap-1.5">
-                  <button
-                    className="btn-secondary px-2.5 py-1 text-[12px]"
-                    onClick={() => void download(file.id)}
-                    disabled={readOnlyArchive || file.status !== 'ACTIVE'}
-                    title={
-                      readOnlyArchive
-                        ? 'Archived Spaces are read-only'
-                        : file.status !== 'ACTIVE'
-                          ? 'This upload never completed'
-                          : 'Download file'
-                    }
-                  >
-                    <Icon name="download" size={14} />
-                    Download
-                  </button>
-                  {canEdit && (
-                    <>
-                      <button
-                        className="btn-secondary px-2.5 py-1 text-[12px]"
-                        onClick={() => setPrompt({ kind: 'rename', file })}
-                      >
-                        <Icon name="pencil" size={14} />
-                        Rename
-                      </button>
-                      <button
-                        className="btn-danger px-2.5 py-1 text-[12px]"
-                        onClick={() => setPending({ kind: 'delete-file', file })}
-                      >
-                        <Icon name="trash" size={14} />
-                        Delete
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            ))}
-
-            {visibleFiles.length === 0 && childFolders.length === 0 && (
-              <div className="px-5 py-10 text-center">
-                <Icon name="folder" size={36} className="mx-auto text-slate-300" />
-                <p className="mt-2 text-[13px] font-medium text-primary">No files in this folder yet</p>
-                <p className="mt-1 text-[12px] text-muted">
-                  {canEdit ? 'Upload something to get started.' : 'The owner has not uploaded files here.'}
-                </p>
-              </div>
-            )}
-          </div>
-        </section>
+        <SpaceFiles
+          spaceId={id}
+          canEdit={canEdit}
+          readOnly={readOnlyArchive}
+          onChanged={refreshSpace}
+          onOpenVault={() => navigate('/vault')}
+        />
       )}
 
       {activeTab === 'members' && (
@@ -665,7 +476,7 @@ export default function SpaceDetail({
                 {members.length} member{members.length === 1 ? '' : 's'}
               </span>
             </div>
-            <div className="overflow-x-auto">
+            <div className="hidden overflow-x-auto sm:block">
               <table className="w-full text-left text-[13px]">
                 <thead className="border-b border-line bg-slate-50 text-[11px] uppercase tracking-wider text-muted">
                   <tr>
@@ -752,6 +563,74 @@ export default function SpaceDetail({
                   ))}
                 </tbody>
               </table>
+            </div>
+
+            {/* Mobile: the five-column table cannot be read at 390px, so each
+                member becomes a compact card with the same actions. */}
+            <div className="divide-y divide-line/70 sm:hidden">
+              {members.map((member) => (
+                <div key={member.userId} className="space-y-2.5 px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-flash-50 text-[11px] font-bold text-flash-700">
+                      {member.displayName.charAt(0).toUpperCase()}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate text-[13px] font-medium text-primary">{member.displayName}</span>
+                        {member.userId === user.id && (
+                          <span className="badge bg-slate-100 text-slate-600">you</span>
+                        )}
+                      </span>
+                      <span className="block truncate text-[11px] text-muted">{member.email}</span>
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
+                    <span className={`badge ${member.role === 'OWNER' ? 'bg-flash-50 text-flash-700' : 'bg-slate-100 text-slate-700'}`}>
+                      {member.role}
+                    </span>
+                    <span
+                      className={`badge ${
+                        member.status === 'ACTIVE'
+                          ? 'bg-emerald-50 text-emerald-700'
+                          : member.status === 'INVITED'
+                            ? 'bg-amber-50 text-amber-700'
+                            : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {member.status}
+                    </span>
+                    <span>Joined {member.joinedAt ? fmtDate(member.joinedAt) : '—'}</span>
+                  </div>
+                  {isOwner && member.role !== 'OWNER' && member.status === 'ACTIVE' && (
+                    <div className="flex items-center gap-2">
+                      <select
+                        className="input h-8 w-auto text-[12px]"
+                        value={member.role}
+                        disabled={!canEdit}
+                        onChange={async (event) => {
+                          try {
+                            await api.changeRole(id, member.userId, event.target.value as 'EDITOR' | 'VIEWER');
+                            await load();
+                            toast('Role updated', 'success');
+                          } catch (e) {
+                            toast(e instanceof Error ? e.message : 'Could not change role', 'error');
+                          }
+                        }}
+                      >
+                        <option value="EDITOR">EDITOR</option>
+                        <option value="VIEWER">VIEWER</option>
+                      </select>
+                      <button
+                        className="btn-danger px-2 py-1 text-[12px]"
+                        disabled={!canEdit}
+                        onClick={() => setPending({ kind: 'revoke', userId: member.userId, name: member.displayName })}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
 
@@ -1029,65 +908,27 @@ export default function SpaceDetail({
         </section>
       )}
 
-      {activeTab === 'activity' && (
-        <section className="rounded-xl border border-line bg-white p-5 shadow-xs">
-          <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Recent activity</h2>
-          {activity.length === 0 ? (
-            <p className="py-8 text-center text-[13px] text-muted">No activity recorded yet.</p>
-          ) : (
-            <ol className="mt-4 space-y-4">
-              {activity.map((entry) => (
-                <li key={entry.id} className="flex items-start gap-3">
-                  <span className="mt-1.5 h-2 w-2 flex-shrink-0 rounded-full bg-flash-600" />
-                  <div className="min-w-0">
-                    <p className="text-[13px] text-primary">
-                      {entry.action.replace(/_/g, ' ').toLowerCase()}
-                    </p>
-                    <p className="text-[11px] text-muted">
-                      {fmtDateTime(entry.createdAt)} · {timeAgo(entry.createdAt)}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
-      )}
+      {activeTab === 'activity' && <SpaceActivityPanel spaceId={id} />}
 
-      {activeTab === 'settings' && (
-        canEdit && space ? (
-          <SpaceSettingsForm key={space.updatedAt} space={space} onSaved={() => void load()} />
+      {activeTab === 'settings' && space && (
+        isOwner && writableStatus ? (
+          <SpaceSettingsForm
+            key={space.updatedAt}
+            space={space}
+            onSaved={() => void load()}
+            onOpenSpace={(newId) => navigate(`/spaces/${newId}`)}
+          />
         ) : (
-          <div className="rounded-xl border border-line bg-white p-5 text-[13px] text-muted shadow-xs">
-            {writableStatus
-              ? 'Only owners and editors can change Space settings.'
-              : 'This Space is read-only. Settings cannot be changed after archiving starts.'}
-          </div>
+          // Editors and viewers never get editable inputs: settings are owner-only
+          // on the server, so the UI must not offer controls that would 403.
+          <SpaceSettingsReadOnly space={space} writableStatus={writableStatus} />
         )
       )}
-
-      <PromptDialog
-        open={prompt !== null}
-        title={prompt?.kind === 'rename' ? 'Rename file' : 'New folder'}
-        label={prompt?.kind === 'rename' ? 'File name' : 'Folder name'}
-        initialValue={prompt?.kind === 'rename' ? prompt.file.name : ''}
-        placeholder={prompt?.kind === 'rename' ? 'report.pdf' : 'design-assets'}
-        maxLength={prompt?.kind === 'rename' ? 255 : 120}
-        confirmLabel={prompt?.kind === 'rename' ? 'Rename' : 'Create folder'}
-        busy={busy}
-        onCancel={() => setPrompt(null)}
-        onSubmit={(value) => {
-          if (!prompt) return;
-          if (prompt.kind === 'rename') void renameFile(prompt.file, value);
-          else void createFolder(value);
-        }}
-      />
 
       <ConfirmDialog
         open={pending !== null}
         title={
-          pending?.kind === 'delete' || pending?.kind === 'delete-file'
-            ? 'Delete permanently?'
+          pending?.kind === 'delete' ? 'Delete permanently?'
             : pending?.kind === 'archive'
               ? 'Archive this Space?'
               : 'Remove this member?'
@@ -1097,18 +938,14 @@ export default function SpaceDetail({
             ? `"${space.name}" will be packaged into your Vault. Members lose write access immediately and the Space becomes read-only.`
             : pending?.kind === 'delete'
               ? `"${space.name}" will be removed from every listing. This cannot be undone.`
-              : pending?.kind === 'delete-file'
-                ? `"${pending.file.name}" will be removed from this Space. This cannot be undone.`
-                : pending?.kind === 'revoke'
+              : pending?.kind === 'revoke'
                   ? `${pending.name} will immediately lose access to this Space.`
                   : ''
         }
         confirmLabel={
           pending?.kind === 'delete'
             ? 'Delete Space'
-            : pending?.kind === 'delete-file'
-              ? 'Delete file'
-              : pending?.kind === 'archive'
+            : pending?.kind === 'archive'
                 ? 'Archive Space'
                 : 'Remove member'
         }
@@ -1133,30 +970,57 @@ function Meta({ label, value, mono = false }: { label: string; value: string; mo
 function SpaceSettingsForm({
   space,
   onSaved,
+  onOpenSpace,
 }: {
   space: SpaceDetailType;
   onSaved: () => void;
+  onOpenSpace: (spaceId: string) => void;
 }) {
   const toast = useToast().toast;
+  const isOwner = space.role === 'OWNER';
   const [name, setName] = useState(space.name);
   const [purpose, setPurpose] = useState(space.purpose);
   const [description, setDescription] = useState(space.description);
   const [expiry, setExpiry] = useState(toDateTimeLocal(space.expiryAt));
+  const [invitationsEnabled, setInvitationsEnabled] = useState(space.invitationsEnabled !== false);
+  const [defaultInviteRole, setDefaultInviteRole] = useState<'EDITOR' | 'VIEWER'>(
+    space.defaultInviteRole === 'EDITOR' ? 'EDITOR' : 'VIEWER',
+  );
   const [busy, setBusy] = useState(false);
+
+  const [dupOpen, setDupOpen] = useState(false);
+  const [dupName, setDupName] = useState(`${space.name} (copy)`);
+  const [dupExpiry, setDupExpiry] = useState(
+    toDateTimeLocal(new Date(Date.now() + 7 * 86_400_000).toISOString()),
+  );
+  const [copyFiles, setCopyFiles] = useState(false);
+  const [duplicating, setDuplicating] = useState(false);
+  const [duplicated, setDuplicated] = useState<DuplicateSpaceResult | null>(null);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (name.trim().length < 3) {
+      toast('Space name must be at least 3 characters', 'error');
+      return;
+    }
     if (new Date(expiry).getTime() <= new Date(space.startAt).getTime()) {
       toast('The end time must be after the start time', 'error');
       return;
     }
     setBusy(true);
     try {
-      await api.updateSpace(space.id, {
+      const payload = {
         name: name.trim(),
         purpose: purpose.trim(),
         description: description.trim(),
         expiryAt: new Date(expiry).toISOString(),
+      };
+      // Owner-only endpoint (`PATCH /spaces/:id/settings`). Editors and viewers
+      // never reach this form.
+      await api.updateSpaceSettings(space.id, {
+        ...payload,
+        invitationsEnabled,
+        defaultInviteRole,
       });
       toast('Space settings saved', 'success');
       onSaved();
@@ -1167,51 +1031,462 @@ function SpaceSettingsForm({
     }
   };
 
+  const runDuplicate = async () => {
+    if (new Date(dupExpiry).getTime() <= Date.now()) {
+      toast('The new end time must be in the future', 'error');
+      return;
+    }
+    setDuplicating(true);
+    try {
+      const result = await api.duplicateSpace(space.id, {
+        name: dupName.trim() || undefined,
+        expiryAt: new Date(dupExpiry).toISOString(),
+        copyFiles,
+      });
+      setDuplicated(result);
+      setDupOpen(false);
+      toast(`"${result.space.name}" created with you as OWNER`, 'success');
+      onSaved();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Could not duplicate this Space', 'error');
+    } finally {
+      setDuplicating(false);
+    }
+  };
+
   return (
-    <form onSubmit={submit} className="rounded-xl border border-line bg-white p-5 shadow-xs">
-      <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Space settings</h2>
-      <p className="mt-1 text-[12px] text-muted">
-        Changes are recorded in the audit log. The start time cannot be moved.
-      </p>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <label className="block">
-          <span className="field-label">Name</span>
-          <input className="input" required maxLength={120} value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="block">
-          <span className="field-label">Purpose</span>
-          <input className="input" required maxLength={300} value={purpose} onChange={(e) => setPurpose(e.target.value)} />
-        </label>
-        <label className="block sm:col-span-2">
-          <span className="field-label">Description</span>
-          <textarea
-            className="input resize-none"
-            rows={3}
-            maxLength={2000}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </label>
-        <label className="block">
-          <span className="field-label">End time</span>
-          <input
-            className="input"
-            type="datetime-local"
-            required
-            value={expiry}
-            onChange={(e) => setExpiry(e.target.value)}
-          />
-        </label>
-        <div className="rounded-lg bg-slate-50 p-3 text-[12px] text-muted">
-          Starts {fmtDateTime(space.startAt)}. Moving the end time changes the countdown immediately;
-          members are notified by the lifecycle runner.
+    <div className="space-y-4">
+      <form onSubmit={submit} className="rounded-xl border border-line bg-white p-5 shadow-xs">
+        <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Space settings</h2>
+        <p className="mt-1 text-[12px] text-muted">
+          Changes are recorded in the audit log. The start time cannot be moved.
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="field-label">Name</span>
+            <input
+              className="input"
+              required
+              minLength={3}
+              maxLength={120}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <span className="mt-1 block text-[11px] text-muted">{name.trim().length}/120</span>
+          </label>
+          <label className="block">
+            <span className="field-label">Purpose</span>
+            <input
+              className="input"
+              required
+              maxLength={120}
+              value={purpose}
+              onChange={(e) => setPurpose(e.target.value)}
+            />
+          </label>
+          <label className="block sm:col-span-2">
+            <span className="field-label">Description</span>
+            <textarea
+              className="input resize-none"
+              rows={3}
+              maxLength={2000}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            <span className="mt-1 block text-[11px] text-muted">{description.length}/2000</span>
+          </label>
+          <label className="block">
+            <span className="field-label">End time</span>
+            <input
+              className="input"
+              type="datetime-local"
+              required
+              value={expiry}
+              onChange={(e) => setExpiry(e.target.value)}
+            />
+          </label>
+          <div className="rounded-lg bg-slate-50 p-3 text-[12px] text-muted">
+            Starts {fmtDateTime(space.startAt)}. Moving the end time changes the countdown immediately and
+            re-arms the lifecycle warning if the new deadline is outside the warning window.
+          </div>
         </div>
-      </div>
-      <div className="mt-4 flex justify-end">
-        <button className="btn-primary" type="submit" disabled={busy}>
-          {busy ? 'Saving…' : 'Save changes'}
+
+        {isOwner && (
+          <div className="mt-5 rounded-lg border border-line p-4">
+            <h3 className="font-display text-[13px] font-bold tracking-tight text-primary">Invitations</h3>
+            <p className="mt-1 text-[12px] text-muted">
+              Control whether this Space can be joined through invites while it is live.
+            </p>
+            <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
+              <label className="flex items-center gap-2 text-[12px] font-medium text-primary">
+                <input
+                  type="checkbox"
+                  checked={invitationsEnabled}
+                  onChange={(e) => setInvitationsEnabled(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                Allow invitations
+              </label>
+              <label className="block sm:w-52">
+                <span className="field-label">Default role for links</span>
+                <select
+                  className="input"
+                  value={defaultInviteRole}
+                  onChange={(e) => setDefaultInviteRole(e.target.value as 'EDITOR' | 'VIEWER')}
+                  disabled={!invitationsEnabled}
+                >
+                  <option value="VIEWER">VIEWER — read only</option>
+                  <option value="EDITOR">EDITOR — can upload and edit</option>
+                </select>
+              </label>
+            </div>
+            <p className="mt-2 text-[11px] text-muted">
+              OWNER can never be granted through an invitation.
+            </p>
+          </div>
+        )}
+
+        <div className="mt-4 flex justify-end">
+          <button className="btn-primary" type="submit" disabled={busy}>
+            {busy ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
+      </form>
+
+      {isOwner && (
+        <section className="rounded-xl border border-line bg-white p-5 shadow-xs">
+          <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Duplicate this Space</h2>
+          <p className="mt-1 text-[12px] text-muted">
+            Creates a brand-new Space with you as OWNER, a fresh lifecycle and a new deadline. Members,
+            invitations and archives are never copied.
+          </p>
+          {duplicated ? (
+            <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-4">
+              <p className="text-[13px] font-medium text-primary">
+                “{duplicated.space.name}” created
+              </p>
+              <p className="mt-1 text-[12px] text-slate-600">
+                {duplicated.foldersCopied} folder(s) and {duplicated.filesCopied} file(s) copied
+                {duplicated.filesSkipped > 0 ? `, ${duplicated.filesSkipped} skipped` : ''}. Expires{' '}
+                {fmtDateTime(duplicated.space.expiryAt)}.
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button className="btn-primary px-3 py-1.5 text-[12px]" onClick={() => onOpenSpace(duplicated.space.id)}>
+                  <Icon name="external-link" size={14} />
+                  Open Space
+                </button>
+                <button className="btn-secondary px-3 py-1.5 text-[12px]" onClick={() => setDuplicated(null)}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ) : dupOpen ? (
+            <div className="mt-3 space-y-3 rounded-lg border border-line bg-slate-50/60 p-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="field-label">New name</span>
+                  <input
+                    className="input"
+                    maxLength={120}
+                    value={dupName}
+                    onChange={(e) => setDupName(e.target.value)}
+                  />
+                </label>
+                <label className="block">
+                  <span className="field-label">New end time</span>
+                  <input
+                    className="input"
+                    type="datetime-local"
+                    value={dupExpiry}
+                    onChange={(e) => setDupExpiry(e.target.value)}
+                  />
+                </label>
+              </div>
+              <label className="flex items-start gap-2 text-[12px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={copyFiles}
+                  onChange={(e) => setCopyFiles(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-slate-300"
+                />
+                <span>
+                  Copy file contents as independent objects (uses this Space's storage quota). Leave
+                  unchecked to copy only the folder structure.
+                </span>
+              </label>
+              <div className="flex justify-end gap-2">
+                <button className="btn-secondary px-3 py-1.5 text-[12px]" onClick={() => setDupOpen(false)} disabled={duplicating}>
+                  Cancel
+                </button>
+                <button className="btn-primary px-3 py-1.5 text-[12px]" onClick={() => void runDuplicate()} disabled={duplicating}>
+                  {duplicating ? 'Duplicating…' : 'Create duplicate'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button className="btn-secondary mt-3 px-3 py-1.5 text-[12px]" onClick={() => setDupOpen(true)}>
+              <Icon name="copy" size={14} />
+              Duplicate Space
+            </button>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Space activity (Module 12): server-side filters, pagination and an
+ * authorised CSV export. The API enforces the caller's Space role, so this
+ * panel renders nothing privileged that the server would refuse.
+ */
+function SpaceActivityPanel({ spaceId }: { spaceId: string }) {
+  const [page, setPage] = useState<Awaited<ReturnType<typeof api.spaceActivity>> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [filters, setFilters] = useState({
+    category: '' as '' | 'SPACE' | 'FILE' | 'FOLDER' | 'MEMBERSHIP' | 'INVITATION' | 'EXTENSION' | 'ARCHIVE' | 'CLEANUP' | 'STORAGE' | 'ADMIN' | 'SECURITY',
+    outcome: '' as '' | 'SUCCESS' | 'FAILURE',
+    actorType: '' as '' | 'USER' | 'ADMIN' | 'SYSTEM',
+    from: '',
+    sort: 'newest' as 'newest' | 'oldest',
+    offset: 0,
+  });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setPage(
+        await api.spaceActivity(spaceId, {
+          category: filters.category || undefined,
+          outcome: filters.outcome || undefined,
+          actorType: filters.actorType || undefined,
+          from: filters.from ? new Date(filters.from).toISOString() : undefined,
+          sort: filters.sort,
+          limit: 25,
+          offset: filters.offset,
+        }),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load activity');
+    } finally {
+      setLoading(false);
+    }
+  }, [spaceId, filters]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const { blob, filename } = await api.downloadSpaceActivity(spaceId, {
+        category: filters.category || undefined,
+        outcome: filters.outcome || undefined,
+        actorType: filters.actorType || undefined,
+        from: filters.from ? new Date(filters.from).toISOString() : undefined,
+        sort: filters.sort,
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-wrap items-end gap-2 rounded-xl border border-line bg-white p-3 shadow-xs">
+        <label className="block text-[11px] font-medium text-muted">
+          Category
+          <select
+            className="input mt-1 w-auto"
+            value={filters.category}
+            onChange={(e) => setFilters((f) => ({ ...f, category: e.target.value as typeof f.category, offset: 0 }))}
+          >
+            <option value="">All</option>
+            {['SPACE', 'FILE', 'FOLDER', 'MEMBERSHIP', 'INVITATION', 'EXTENSION', 'ARCHIVE', 'CLEANUP', 'STORAGE'].map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-[11px] font-medium text-muted">
+          Outcome
+          <select
+            className="input mt-1 w-auto"
+            value={filters.outcome}
+            onChange={(e) => setFilters((f) => ({ ...f, outcome: e.target.value as typeof f.outcome, offset: 0 }))}
+          >
+            <option value="">Any</option>
+            <option value="SUCCESS">Success</option>
+            <option value="FAILURE">Failure</option>
+          </select>
+        </label>
+        <label className="block text-[11px] font-medium text-muted">
+          Actor
+          <select
+            className="input mt-1 w-auto"
+            value={filters.actorType}
+            onChange={(e) => setFilters((f) => ({ ...f, actorType: e.target.value as typeof f.actorType, offset: 0 }))}
+          >
+            <option value="">Anyone</option>
+            <option value="USER">User</option>
+            <option value="ADMIN">Admin</option>
+            <option value="SYSTEM">System</option>
+          </select>
+        </label>
+        <label className="block text-[11px] font-medium text-muted">
+          From
+          <input
+            type="date"
+            className="input mt-1 w-auto"
+            value={filters.from}
+            onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value, offset: 0 }))}
+          />
+        </label>
+        <button
+          className="btn-secondary px-3 py-1.5 text-[12px]"
+          onClick={() => setFilters((f) => ({ ...f, sort: f.sort === 'newest' ? 'oldest' : 'newest', offset: 0 }))}
+        >
+          {filters.sort === 'newest' ? 'Newest first' : 'Oldest first'}
+        </button>
+        <button className="btn-secondary ml-auto px-3 py-1.5 text-[12px]" onClick={() => void exportCsv()} disabled={exporting}>
+          {exporting ? 'Preparing…' : 'Export CSV'}
         </button>
       </div>
-    </form>
+
+      {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700">{error}</p>}
+
+      <div className="rounded-xl border border-line bg-white p-5 shadow-xs">
+        <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Activity</h2>
+        {loading ? (
+          <div className="mt-4 space-y-2">
+            {[0, 1, 2].map((i) => <div key={i} className="skeleton h-10 w-full rounded-lg" />)}
+          </div>
+        ) : (page?.entries.length ?? 0) === 0 ? (
+          <p className="py-8 text-center text-[13px] text-muted">No activity matches these filters.</p>
+        ) : (
+          <ol className="mt-4 divide-y divide-slate-100">
+            {page!.entries.map((entry) => (
+              <li key={entry.id} className="flex items-start gap-3 py-2.5">
+                <span
+                  className={`mt-1.5 h-2 w-2 flex-shrink-0 rounded-full ${
+                    entry.outcome === 'FAILURE' ? 'bg-red-500' : 'bg-flash-600'
+                  }`}
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] text-primary">
+                    {entry.action.replace(/_/g, ' ').toLowerCase()}
+                    <span className="ml-2 text-[11px] text-muted">{entry.category}</span>
+                  </p>
+                  <p className="text-[11px] text-muted">
+                    {entry.actorType === 'SYSTEM'
+                      ? 'FlashGuard worker'
+                      : entry.actorName ?? (entry.userId ? entry.userId.slice(0, 8) : 'Unknown')}
+                    {' · '}
+                    {fmtDateTime(entry.createdAt)} · {timeAgo(entry.createdAt)}
+                  </p>
+                  {entry.reason && <p className="text-[11px] text-red-600">{entry.reason}</p>}
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+        {page && page.total > 25 && (
+          <div className="mt-3 flex items-center justify-between border-t border-line pt-3 text-[12px] text-muted">
+            <span>
+              {page.offset + 1}–{Math.min(page.offset + page.limit, page.total)} of {page.total}
+            </span>
+            <span className="flex gap-2">
+              <button
+                className="btn-secondary px-2.5 py-1 text-[12px]"
+                disabled={page.offset === 0}
+                onClick={() => setFilters((f) => ({ ...f, offset: Math.max(0, f.offset - 25) }))}
+              >
+                Previous
+              </button>
+              <button
+                className="btn-secondary px-2.5 py-1 text-[12px]"
+                disabled={page.offset + page.limit >= page.total}
+                onClick={() => setFilters((f) => ({ ...f, offset: f.offset + 25 }))}
+              >
+                Next
+              </button>
+            </span>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** Read-only settings view for editors, viewers and archived Spaces. */
+function SpaceSettingsReadOnly({
+  space,
+  writableStatus,
+}: {
+  space: SpaceDetailType;
+  writableStatus: boolean;
+}) {
+  const reason = !writableStatus
+    ? 'This Space is read-only because archiving has started.'
+    : space.role === 'EDITOR'
+      ? 'Editors can manage files and folders, but only the owner can change Space settings.'
+      : space.role === 'VIEWER'
+        ? 'You have view access to this Space. Only the owner can change its settings.'
+        : 'You are viewing this Space as an administrator. Only the owner can change its settings.';
+
+  return (
+    <section className="rounded-xl border border-line bg-white p-5 shadow-xs">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="font-display text-[14px] font-bold tracking-tight text-primary">Space settings</h2>
+          <p className="mt-1 text-[12px] text-muted">{reason}</p>
+        </div>
+        <span className="badge bg-slate-100 text-slate-600">Read only</span>
+      </div>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <ReadOnlyField label="Name" value={space.name} />
+        <ReadOnlyField label="Purpose" value={space.purpose} />
+        <ReadOnlyField label="Description" value={space.description || '—'} full />
+        <ReadOnlyField label="Starts" value={fmtDateTime(space.startAt)} />
+        <ReadOnlyField label="Ends" value={fmtDateTime(space.expiryAt)} />
+        <ReadOnlyField
+          label="Invitations"
+          value={
+            space.invitationsEnabled === false
+              ? 'Disabled'
+              : `Enabled · default role ${space.defaultInviteRole ?? 'VIEWER'}`
+          }
+        />
+        <ReadOnlyField label="Your role" value={space.role ?? 'ADMIN'} />
+      </div>
+    </section>
+  );
+}
+
+function ReadOnlyField({
+  label,
+  value,
+  full = false,
+}: {
+  label: string;
+  value: string;
+  full?: boolean;
+}) {
+  return (
+    <div className={full ? 'sm:col-span-2' : undefined}>
+      <span className="field-label">{label}</span>
+      <p className="rounded-lg bg-slate-50 px-3 py-2 text-[13px] text-primary">{value}</p>
+    </div>
   );
 }
