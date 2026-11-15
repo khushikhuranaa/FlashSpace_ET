@@ -61,18 +61,12 @@ services:
         generateValue: true
       - key: JOB_SECRET
         generateValue: true
+      # Transactional mail is mocked until an SMTP provider is configured; auth
+      # email (sign-up, recovery) is sent by Supabase, not by this service. To
+      # enable real mail later, add SMTP_HOST, SMTP_PORT, SMTP_USER,
+      # SMTP_PASSWORD and SMTP_FROM in the dashboard and set this to smtp.
       - key: EMAIL_TRANSPORT
-        value: smtp
-      - key: SMTP_HOST
-        sync: false
-      - key: SMTP_PORT
-        sync: false
-      - key: SMTP_USER
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: EMAIL_FROM
-        sync: false
+        value: mock
 
   # The frontend is not hosted here: .github/workflows/deploy-web-pages.yml
   # publishes the static Vite bundle to GitHub Pages. This API must allow that
