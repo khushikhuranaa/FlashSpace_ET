@@ -79,18 +79,8 @@ services:
   # origin in WEB_ORIGIN (e.g. https://<owner>.github.io) or browser calls fail
   # the CORS check.
 
-  # Scheduler: Render cron calls the authenticated lifecycle endpoint. The
-  # endpoint is idempotent per (date, space, phase), so a missed or duplicated
-  # run is harmless. Replace the URL with the deployed API host.
-  - type: cron
-    name: flashspace-lifecycle
-    runtime: node
-    plan: starter
-    schedule: "*/10 * * * *"
-    buildCommand: "echo 'no build required'"
-    startCommand: "node apps/api/scripts/run-lifecycle.mjs"
-    envVars:
-      - key: API_BASE_URL
-        sync: false
-      - key: JOB_SECRET
-        sync: false
+  # Scheduler: deliberately no Render cron service — cron instances are a paid
+  # plan, and adding one puts this blueprint behind a payment method. The same
+  # authenticated, idempotent endpoint runs for free from GitHub Actions
+  # (.github/workflows/lifecycle-cron.yml); after the first deploy, set its
+  # FLASHSPACE_API_URL and FLASHSPACE_JOB_SECRET repository secrets.

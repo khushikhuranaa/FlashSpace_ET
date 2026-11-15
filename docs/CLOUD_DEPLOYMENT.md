@@ -250,19 +250,26 @@ FlashSpace account**.
 
 ## Render blueprint (exact settings)
 
-`render.yaml` defines two services; the frontend is published to GitHub Pages
-instead of being hosted here.
+`render.yaml` defines one service: the API. The frontend is published to GitHub
+Pages, and the lifecycle scheduler runs from GitHub Actions — Render cron
+instances are a paid plan, so keeping the scheduler out of the blueprint keeps
+the deployment on the free tier.
 
 | Service | Type | Build | Start / publish | Health check |
 | --- | --- | --- | --- | --- |
 | `flashspace-api` | Web (Docker) | `apps/api/Dockerfile`, build context = repo root | image `CMD node apps/api/dist/server.js` | `/health` |
-| `flashspace-lifecycle` | Cron, `*/10 * * * *` | none | `node apps/api/scripts/run-lifecycle.mjs` | — |
+
+Scheduler: `.github/workflows/lifecycle-cron.yml` POSTs to `/jobs/lifecycle/run`
+every 30 minutes. Set its `FLASHSPACE_API_URL` and `FLASHSPACE_JOB_SECRET`
+repository secrets after the first deploy (the job secret is the same value as
+the API's `JOB_SECRET`). The endpoint is idempotent per (date, space, phase), so
+a missed or duplicated run is harmless.
 
 Environment: the production block above, with `WEB_ORIGIN` listing every browser
 origin, including the Pages one once the frontend is live.
 
 Deployment order: (1) Supabase project, migrations and buckets, (2) API service,
-(3) GitHub Pages frontend, (4) cron job. After the first API boot run
+(3) GitHub Pages frontend, (4) the Actions cron workflow. After the first API boot run
 `DATABASE_URL=... npm run db:status -w @flashspace/api` and expect
 `pending: []`, `drifted: []`. A restart logs `applied 0, already applied 10`.
 

@@ -1,0 +1,17 @@
+name: Lifecycle cron
+
+on:
+  schedule:
+    # Every 30 minutes (PRD §14.2 — deterministic, idempotent runs).
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger lifecycle pass
+        run: |
+          curl -sS -f -X POST "${{ secrets.FLASHSPACE_API_URL }}/jobs/lifecycle/run" \
+            -H "x-job-secret: ${{ secrets.FLASHSPACE_JOB_SECRET }}" \
+            --max-time 120 | tee /dev/stderr | grep -q '"failures":\[\]'
